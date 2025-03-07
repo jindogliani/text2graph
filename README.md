@@ -1,15 +1,4 @@
-# CommonScenes
-
-This is the official implementation of the paper **CommonScenes: Generating Commonsense 3D Indoor Scenes with Scene Graph Diffusion**. Based on diffusion model, we propose a method to generate entire 3D scene from scene graphs, encompassing its layout and 3D geometries holistically. 
-
-
-<a href="https://sites.google.com/view/commonscenes">Website</a> | <a href="https://arxiv.org/pdf/2305.16283.pdf">Arxiv</a>
-
-[Guangyao Zhai](https://ymxlzgy.com/) *, [Evin Pınar Örnek](https://evinpinar.github.io/) *, [Shun-Cheng Wu](https://shunchengwu.github.io/), [Yan Di](https://shangbuhuan13.github.io/), [Federico Tombari](https://federicotombari.github.io/), [Nassir Navab](https://www.cs.cit.tum.de/camp/members/cv-nassir-navab/nassir-navab/), and [Benjamin Busam](https://www.cs.cit.tum.de/camp/members/benjamin-busam/). (*Equal contribution.)
-<br/> 
-**NeurIPS 2023**
-
-
+# Text-to-Graph 3D Scene Synthesis
 
 ## Setup
 ### Environment
@@ -118,16 +107,11 @@ If you find this work useful in your research, please cite
 
 ```
 @inproceedings{
-  zhai2023commonscenes,
-  title={CommonScenes: Generating Commonsense 3D Indoor Scenes with Scene Graph Diffusion},
-  author={Zhai, Guangyao and {\"O}rnek, Evin P{\i}nar and Wu, Shun-Cheng and Di, Yan and Tombari, Federico and Navab, Nassir and Busam, Benjamin},
-  booktitle={Thirty-seventh Conference on Neural Information Processing Systems},
-  year={2023},
-  url={https://openreview.net/forum?id=1SF2tiopYJ}
+  
 }
 
 ```
 
 This repository is based on <a href="https://github.com/he-dhamo/graphto3d">Graph-to-3D</a> and <a href="https://github.com/yccyenchicheng/SDFusion">SDFusion</a>. We thank the authors for making their code available.
 ### Disclaimer
-Tired students finished the pipeline in busy days...
+Chubby Maltese
