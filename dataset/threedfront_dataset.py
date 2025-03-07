@@ -38,7 +38,7 @@ changed_relationships_dict = {
         "above":"above"
     }
 
-def load_ckpt(ckpt):
+def load_ckpt(ckpt): #체크포인트 불러오는 함수
     map_fn = lambda storage, loc: storage
     if type(ckpt) == str:
         state_dict = torch.load(ckpt, map_location=map_fn)
@@ -58,7 +58,7 @@ class ThreedFrontDatasetSceneGraph(data.Dataset):
         self.with_feats = with_feats
         self.with_CLIP = with_CLIP
         self.cond_model = None
-        self.large = large
+        self.large = large #확장된 혹은 축소된 클래스 세트로 세밀한 혹은 축약된 표현
         self.recompute_feats = recompute_feats
         self.recompute_clip = recompute_clip
 
@@ -82,18 +82,24 @@ class ThreedFrontDatasetSceneGraph(data.Dataset):
 
         self.fm = FreeMemLinux('GB')
         self.vocab = {}
+        
+        #vocab 사전 안에 'object_idx_to_name' key에 객체 이름 리스트 저장
         with open(os.path.join(self.root, 'classes_{}.txt'.format(self.room_type)), "r") as f:
             self.vocab['object_idx_to_name'] = f.readlines()
         # with open(os.path.join(self.root, 'classes_all.txt'), "r") as f:
         #     self.vocab['object_idx_to_name'] = f.readlines()
+        
+        #vocab 사전 안에 'pred_idx_to_name' key에 관계 이름 리스트 저장.
         with open(os.path.join(self.root, 'relationships.txt'), "r") as f:
             self.vocab['pred_idx_to_name'] = ['in\n']
             self.vocab['pred_idx_to_name']+=f.readlines()
 
         # list of relationship categories
+
         self.relationships = self.read_relationships(os.path.join(self.root, 'relationships.txt'))
         self.relationships_dict = dict(zip(self.relationships,range(1,len(self.relationships)+1)))
         self.relationships_dict_r = dict(zip(self.relationships_dict.values(), self.relationships_dict.keys()))
+        # 사전형 및 리버스 사전형 생성 키값 1-관계갯수.
 
         if split == 'train_scans': # training set
             self.rel_json_file = os.path.join(self.root, 'relationships_{}_trainval.json'.format(self.room_type))
@@ -108,34 +114,43 @@ class ThreedFrontDatasetSceneGraph(data.Dataset):
         self.relationship_json, self.objs_json, self.tight_boxes_json = \
                 self.read_relationship_json(self.rel_json_file, self.box_json_file)
 
-
         for scene, infos in self.tight_boxes_json.items():
             for id, info in infos.items():
                 if 'model_path' in info:
                     if info['model_path']:
                         info['model_path'] = root + info['model_path'][36:]
-
+        # 3D-FUTURE-model/eddaa6f4-a280-426c-887d-447889d51461/raw_model.obj 이렇게 읽어옴.
+        # root = '/home/commonscenes/FRONT/' 로 설정할 것. #TODO
 
         self.padding = 0.2
         self.eval = eval
         self.pass_scan_id = pass_scan_id
         self.shuffle_objs = shuffle_objs
+        
+        #CLIP 모델로 객체/관계 피처 임베딩 생성할 때 ~FRONT/visualization 으로 저장
         self.root_3dfront = root_3dfront
         if self.root_3dfront == '':
             self.root_3dfront = os.path.join(self.root, 'visualization')
             if not os.path.exists(self.root_3dfront):
                 os.makedirs(self.root_3dfront)
 
+        # not self.large 일때 객체들 카테고리 단순화 하기 위해 
         self.mapping_full2simple = json.load(open(os.path.join(self.root, "mapping.json"), "r"))
 
         with open(self.catfile, 'r') as f:
             for line in f:
                 category = line.rstrip()
                 self.cat[category] = category
-
-        self.classes = dict(zip(sorted(self.cat), range(len(self.cat))))
+        # print(self.cat) #HJS floor
+        # {'_scene_': '_scene_', 'armchair': 'armchair', 'bookshelf': 'bookshelf', 'cabinet': 'cabinet', 'ceiling_lamp': 'ceiling_lamp', 'chair': 'chair', 'chaise_longue_sofa': 'chaise_longue_sofa', 'children_cabinet': 'children_cabinet', 'chinese_chair': 'chinese_chair', 'coffee_table': 'coffee_table', 'console_table': 'console_table', 'corner_side_table': 'corner_side_table', 'desk': 'desk', 'dining_chair': 'dining_chair', 'dining_table': 'dining_table', 'double_bed': 'double_bed', 'dressing_chair': 'dressing_chair', 'dressing_table': 'dressing_table', 'kids_bed': 'kids_bed', 'l_shaped_sofa': 'l_shaped_sofa', 'lazy_sofa': 'lazy_sofa', 'lounge_chair': 'lounge_chair', 'loveseat_sofa': 'loveseat_sofa', 'multi_seat_sofa': 'multi_seat_sofa', 'nightstand': 'nightstand', 'pendant_lamp': 'pendant_lamp', 'round_end_table': 'round_end_table', 'shelf': 'shelf', 'single_bed': 'single_bed', 'sofa': 'sofa', 'stool': 'stool', 'table': 'table', 'tv_stand': 'tv_stand', 'wardrobe': 'wardrobe', 'wine_cabinet': 'wine_cabinet', 'floor': 'floor'}
+        
+        # self.classes = dict(zip(sorted(self.cat), range(len(self.cat)))) #Floor를 e와 g사이에 ID로 배정. 근데 뒤에 인덱스가 꼬임.
+        self.classes = {key: idx for idx, key in enumerate(self.cat.keys())} #HJS floor 맨마지막 클래스 ID로 할당
         self.classes_r = dict(zip(self.classes.values(), self.classes.keys()))
+        # print(self.classes)
+        # {'_scene_': 0, 'armchair': 1, 'bookshelf': 2, 'cabinet': 3, 'ceiling_lamp': 4, 'chair': 5, 'chaise_longue_sofa': 6, 'children_cabinet': 7, 'chinese_chair': 8, 'coffee_table': 9, 'console_table': 10, 'corner_side_table': 11, 'desk': 12, 'dining_chair': 13, 'dining_table': 14, 'double_bed': 15, 'dressing_chair': 16, 'dressing_table': 17, 'floor': 18, 'kids_bed': 19, 'l_shaped_sofa': 20, 'lazy_sofa': 21, 'lounge_chair': 22, 'loveseat_sofa': 23, 'multi_seat_sofa': 24, 'nightstand': 25, 'pendant_lamp': 26, 'round_end_table': 27, 'shelf': 28, 'single_bed': 29, 'sofa': 30, 'stool': 31, 'table': 32, 'tv_stand': 33, 'wardrobe': 34, 'wine_cabinet': 35}
 
+        #리스트 메서드 활용하려고 객체 리스트화
         points_classes = list(self.classes.keys())
         points_classes.remove('_scene_')
 
@@ -149,8 +164,11 @@ class ThreedFrontDatasetSceneGraph(data.Dataset):
         # of objects in each category are very different from each other. For example, Chairs are the most and lamps
         # are the fewest among all the objects. So when we sample a batch in more fine-grained classes, the problem
         # can be alleviated.
+        
+        # 세분화를 단순화 해주기 이전에 복구용으로 하나 만들어놓은 것
         self.vocab['object_idx_to_name_grained'] = self.vocab['object_idx_to_name']
 
+        # 세분화된(fine-grained) 클래스 분류를 통해 동일한 확률로 샘플링. 객체 별 데이터셋의 수량 불균형 문제를 해결해줌.
         if not self.large:
             self.fine_grained_classes = dict(zip(sorted([voc.strip('\n') for voc in self.vocab['object_idx_to_name']]),range(len(self.vocab['object_idx_to_name']))))
             self.vocab['object_idx_to_name'] = [self.mapping_full2simple[voc.strip('\n')]+'\n' for voc in self.vocab['object_idx_to_name']]
@@ -158,32 +176,42 @@ class ThreedFrontDatasetSceneGraph(data.Dataset):
                                         range(len(list(set(self.vocab['object_idx_to_name']))))))
             self.classes_r = dict(zip(self.classes.values(), self.classes.keys()))
             points_classes = list(set([self.mapping_full2simple[class_] for class_ in points_classes]))
+        # set()은 중복된 항목 삭제
+        # self.vocab['object_idx_to_name']는 이제 단순화(coarse-grained)된 정보만 갖고 있음.
+        # self.vocab['object_idx_to_name']를 통해서 균일한 샘플링이 가능하다. lamp나 chair나 리스트에는 딱 하나만 있어서
 
         points_classes_idx = [self.classes[pc] for pc in points_classes]
-
         self.point_classes_idx = points_classes_idx + [0]
+        # 왜 다시 0번 인덱스 (scene의 인덱스)를 추가하는 거지? #TODO
+
         self.sorted_cat_list = sorted(self.cat)
         self.files = {}
+        
+        #eval_type 종류: addition, removal, relationship 
         self.eval_type = eval_type
+
         # check if all shape features exist. If not they get generated here (once)
-        if with_feats:
+        if with_feats: 
             print('Assume you downloaded the DeepSDF codes and SDFs. If not, please download in README.md')
             # for index in tqdm(range(len(self))):
             #     self.__getitem__(index)
-            self.recompute_feats = False
+            self.recompute_feats = False #재연산이 False이면 SDF 생성을 위한 feature 연산이 필요없음.
 
         # check if all clip features exist. If not they get generated here (once)
         if self.with_CLIP:
-            self.cond_model, preprocess = clip.load("ViT-B/32", device='cuda')
+            self.cond_model, preprocess = clip.load("ViT-B/32", device='cuda') #CLIP 모델 소환
             self.cond_model_cpu, preprocess_cpu = clip.load("ViT-B/32", device='cpu')
             print('loading CLIP')
             print(
                 'Checking for missing clip feats. This can be slow the first time.')
             for index in tqdm(range(len(self))):
                 self.__getitem__(index)
+            # self.__getitem__(0) #HJS 디버깅용 데이터셋 확인용
             self.recompute_clip = False
+        #len(self)는 __len__()에 의해 결정됨. 현재는 len(self.scans)라서 __getitem__()의 인덱스로 들어가도 문제 없음
+        
 
-    def read_relationship_json(self, json_file, box_json_file):
+    def read_relationship_json(self, json_file, box_json_file): #DONE
         """ Reads from json files the relationship labels, objects and bounding boxes
 
         :param json_file: file that stores the objects and relationships
@@ -203,7 +231,7 @@ class ThreedFrontDatasetSceneGraph(data.Dataset):
 
                 relationships = []
                 for relationship in scan["relationships"]:
-                    relationship[2] -= 1
+                    relationship[2] -= 1 # relationships.txt에 있는 관계 인덱스 ID와 python의 인덱스 ID를 맞추기 위해 사용
                     relationships.append(relationship)
 
                 # for every scan in rel json, we append the scan id
@@ -220,9 +248,9 @@ class ThreedFrontDatasetSceneGraph(data.Dataset):
 
                     try:
                         boxes[int(k)] = {}
-                        boxes[int(k)]['param7'] = box_data[scan["scan"]][k]["param7"]
-                        boxes[int(k)]['param7'][6] = boxes[int(k)]['param7'][6]
-                        boxes[int(k)]['scale'] = box_data[scan["scan"]][k]["scale"]
+                        boxes[int(k)]['param7'] = box_data[scan["scan"]][k]["param7"] #pos_x,y,z rot_x,y,z angle(theta)
+                        boxes[int(k)]['param7'][6] = boxes[int(k)]['param7'][6] #angle, theta
+                        boxes[int(k)]['scale'] = box_data[scan["scan"]][k]["scale"] # size of bounding box
                     except Exception as e:
                         # probably box was not saved because there were 0 points in the instance!
                         print(e)
@@ -231,12 +259,12 @@ class ThreedFrontDatasetSceneGraph(data.Dataset):
                     except Exception as e:
                         print(e)
                         continue
-                boxes["scene_center"] = box_data[scan["scan"]]["scene_center"]
-                objs[scan["scan"]] = objects
-                tight_boxes[scan["scan"]] = boxes
+                boxes["scene_center"] = box_data[scan["scan"]]["scene_center"] #씬 가운데 값
+                objs[scan["scan"]] = objects #"scan": "LivingDiningRoom-27430" => 이름을 키값으로 객체 정보 저장
+                tight_boxes[scan["scan"]] = boxes #"LivingDiningRoom-27430" => 이름을 키값으로 바운딩박스 정보 저장
         return rel, objs, tight_boxes
 
-    def read_relationships(self, read_file):
+    def read_relationships(self, read_file): #DONE
         """load list of relationship labels
 
         :param read_file: path of relationship list txt file
@@ -248,6 +276,8 @@ class ThreedFrontDatasetSceneGraph(data.Dataset):
                 relationships.append(relationship)
         return relationships
 
+    # 3D 포인트 클라우드 데이터를 정규화
+    # 중심점에서 제일 먼 거리를 기준으로 normalization. 가장 거리가 먼 값은 1.
     def norm_points(self, p):
         centroid = np.mean(p, axis=0)
         m = np.max(np.sqrt(np.sum(p ** 2, axis=1)))
@@ -275,6 +305,7 @@ class ThreedFrontDatasetSceneGraph(data.Dataset):
         clip_feats_rel = None
 
         # If true, expected paths to saved clip features will be set here
+        # root~/visulization에 CLIP 피처 저장 
         if self.with_CLIP:
             self.clip_feats_path = os.path.join(self.root_3dfront, scan_id,
                                                 'CLIP_{}.pkl'.format(scan_id))
@@ -289,6 +320,7 @@ class ThreedFrontDatasetSceneGraph(data.Dataset):
         feats_path = self.root + "/DEEPSDF_reconstruction/Codes/" # for Graph-to-3D
 
         # Load points for debug
+        # 재연산이 True일 때 혹은 DeepSDF 경로가 없을 때
         if self.with_feats and (not os.path.exists(feats_path) or self.recompute_feats):
             if scan_id in self.files: # Caching
                 (points_list, points_norm_list, instances_list) = self.files[scan_id]
@@ -354,11 +386,10 @@ class ThreedFrontDatasetSceneGraph(data.Dataset):
             if not self.large:
                 scene_class_id_grained = self.fine_grained_classes[scene_instance_class]
                 scene_instance_class = self.mapping_full2simple[scene_instance_class]
-                scene_class_id = self.classes[scene_instance_class]
+                scene_class_id = self.classes[scene_instance_class] #인스턴스 이름으로 class id찾아내서 저장
 
             else:
                 scene_class_id = self.classes[scene_instance_class] # class id in the entire dataset ids
-
             instance2mask[scene_instance_id] = counter + 1
             counter += 1
 
@@ -380,6 +411,7 @@ class ThreedFrontDatasetSceneGraph(data.Dataset):
                 bbox[6] = angle
 
                 tight_boxes.append(bbox)
+            
             if self.use_SDF:
                 if self.tight_boxes_json[scan_id][key]["model_path"] is None:
                     obj_sdf_list.append(torch.zeros((1, self.sdf_res, self.sdf_res, self.sdf_res))) # floor
@@ -390,7 +422,6 @@ class ThreedFrontDatasetSceneGraph(data.Dataset):
                     sdf = torch.Tensor(obj_sdf).view(1, self.sdf_res, self.sdf_res, self.sdf_res)
                     sdf = torch.clamp(sdf, min=-0.2, max=0.2)
                     obj_sdf_list.append(sdf)
-
             else:
                 obj_sdf_list = None
 
@@ -449,7 +480,7 @@ class ThreedFrontDatasetSceneGraph(data.Dataset):
             # add _scene_ object and _in_scene_ connections
             scene_idx = len(cat_ids)
             for i, ob in enumerate(cat_ids):
-                triples.append([i, 0, scene_idx])
+                triples.append([i, 0, scene_idx]) 
                 words.append(self.get_key(self.classes, ob) + ' ' + 'in' + ' ' + 'room')
             cat_ids.append(0) # TODO check
             cat_ids_grained.append(0)
@@ -457,7 +488,6 @@ class ThreedFrontDatasetSceneGraph(data.Dataset):
             tight_boxes.append([-1, -1, -1, -1, -1, -1, -1])
             if self.use_SDF:
                 obj_sdf_list.append(torch.zeros((1, self.sdf_res, self.sdf_res, self.sdf_res))) # _scene_
-        output = {}
 
         # if features are requested but the files don't exist, we run all loaded pointclouds through clip
         # to compute them and then save them for future usage
@@ -469,9 +499,11 @@ class ThreedFrontDatasetSceneGraph(data.Dataset):
                 for i in range(num_cat - 1):
                     obj_cat.append(self.get_key(self.classes, cat_ids[i]))
                 obj_cat.append('room') # TODO check
+                #CLIP을 사용하겠다고 했는데 피처 파일이 없는 경우 => 객체 피처 생성
                 text_obj = clip.tokenize(obj_cat).to('cuda')
-
+                #encode_text() => 텍스트를 벡터 임베딩으로 변환하는 CLIP 함수
                 feats_ins = self.cond_model.encode_text(text_obj).detach().cpu().numpy()
+                #관계 피처 생성
                 text_rel = clip.tokenize(words).to('cuda')
                 rel = self.cond_model.encode_text(text_rel).detach().cpu().numpy()
                 for i in range(len(words)):
@@ -489,8 +521,9 @@ class ThreedFrontDatasetSceneGraph(data.Dataset):
             clip_feats_ins = list(clip_feats_in['instance_feats'])
             clip_feats_rel = clip_feats_in['rel_feats']
 
-
+        output = {}
         # prepare outputs
+        #다 숫자리스트로 저장되고 이후에 넘파이로 변환.
         output['encoder'] = {}
         output['encoder']['objs'] = cat_ids
         output['encoder']['objs_grained'] = cat_ids_grained # not needed for encoder
@@ -514,8 +547,8 @@ class ThreedFrontDatasetSceneGraph(data.Dataset):
             output['manipulate']['type'] = 'none'
             output['decoder'] = copy.deepcopy(output['encoder'])
         else:
-            if not self.eval:
-                if self.with_changes:
+            if not self.eval: #트레이닝일 때. 평가가 아닐 때.
+                if self.with_changes: #랜점으로 조작해서 데이터 변형
                     output['manipulate']['type'] = ['relationship', 'addition', 'none'][
                         np.random.randint(3)]  # removal is trivial - so only addition and rel change
                 else:
@@ -533,7 +566,7 @@ class ThreedFrontDatasetSceneGraph(data.Dataset):
                         output['manipulate']['relship'] = (rel, pair)
                     else:
                         output['manipulate']['type'] = 'none'
-            else:
+            else: #평가 단계일 때.
                 output['manipulate']['type'] = self.eval_type
                 output['decoder'] = copy.deepcopy(output['encoder'])
                 if output['manipulate']['type'] == 'addition':
@@ -577,7 +610,6 @@ class ThreedFrontDatasetSceneGraph(data.Dataset):
         output['instance_id'] = instances_order
 
         return output
-
 
     def remove_node_and_relationship(self, graph):
         """ Automatic random removal of certain nodes at training time to enable training with changes. In that case
@@ -689,7 +721,7 @@ class ThreedFrontDatasetSceneGraph(data.Dataset):
         else:
             return len(self.scans)
 
-
+    # __getitem__()에서 나온 데이터셋을 배치로 묶어서 모델이 학습할 수 있도록 변환
     def collate_fn_vaegan(self, batch, use_points=False):
         """
         Collate function to be used when wrapping a RIODatasetSceneGraph in a
@@ -825,24 +857,37 @@ class ThreedFrontDatasetSceneGraph(data.Dataset):
     def collate_fn_vaegan_points(self,batch):
         """ Wrapper of the function collate_fn_vaegan to make it also return points
         """
+        # 단순히 포인트 클라우드가 있을 때 self.collate_fn_vaegan()를 실행하기 위한 랩핑 함수 
         return self.collate_fn_vaegan(batch, use_points=True)
 
 
 if __name__ == "__main__":
     dataset = ThreedFrontDatasetSceneGraph(
-        root="/media/ymxlzgy/Data/Dataset/3D-FRONT",
+        root="/mnt/dataset/FRONT/",
         split='val_scans',
         shuffle_objs=True,
         use_SDF=False,
         use_scene_rels=True,
-        with_changes=True,
+        with_changes=False,
         with_feats=False,
         with_CLIP=True,
-        large=False,
+        large=True,
         seed=False,
         room_type='all',
         recompute_clip=False)
     a = dataset[0]
+    
+    print("Scan ID:", a['scan_id'])
+    print("객체 개수:", len(a['encoder']['objs']))
+    print("관계 개수:", len(a['encoder']['triples']))
+    print("객체 ID 목록:", a['encoder']['objs']) #classes_bedroom.txt에서 객체 ID값을 갖고옴.
+    # print("관계 리스트:", a['encoder']['triples'])
+    print("바운딩 박스:", a['encoder']['boxes'].shape)
+    
+    if 'text_feats' in a['encoder']:
+        print("CLIP 객체 특징 벡터 크기:", a['encoder']['text_feats'].shape)
+    if 'rel_feats' in a['encoder']:
+        print("CLIP 관계 특징 벡터 크기:", a['encoder']['rel_feats'].shape)
 
     for x in ['encoder', 'decoder']:
         en_obj = a[x]['objs'].cpu().numpy().astype(np.int32)
@@ -856,6 +901,7 @@ if __name__ == "__main__":
         texts = [dataset.classes_r[cat_id] for cat_id in cat_ids]
         objs = dict(zip(instance_ids.tolist(),texts))
         objs = {str(key): value for key, value in objs.items()}
+        txt_list = []
         for rel in en_triples[:,1]:
             if rel == 0:
                 txt = 'in'
@@ -865,4 +911,11 @@ if __name__ == "__main__":
             txt_list.append(txt)
         txt_list = np.array(txt_list)
         rel_list = np.vstack((sub,obj,en_triples[:,1],txt_list)).transpose()
-        print(a['scan_id'])
+
+    # print("객체 정보 (ID → 이름 변환):")
+    # for obj_id, obj_name in objs.items():
+    #     print(f"  ID {obj_id}: {obj_name}")
+
+    # for i in range(len(rel_list)):
+    #     sub, obj, rel_id, rel_name = rel_list[i]
+    #     print(f"  {objs[str(sub)]} --({rel_name})--> {objs[str(obj)]}")

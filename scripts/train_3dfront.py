@@ -29,14 +29,17 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--batchSize', type=int, default=8, help='input batch size')
 parser.add_argument('--auxlr', type=float, help='auxiliary learning rate, not for v2_full', default=0.0001)
 parser.add_argument('--nepoch', type=int, default=200, help='number of epochs to train for')
+# 데이터셋을 한 바퀴(전체) 학습하는 횟수. 데이터셋이 1000개 샘플로 구성되어 있다면, 1 Epoch 동안 모델은 모든 1000개 샘플을 한 번 학습.
+# Epoch이 너무 작으면 → 모델이 충분히 학습되지 않음 (Underfitting). # Epoch이 너무 크면 → 모델이 과적합(Overfitting)될 가능성이 있음.
+# Validation Loss가 줄어들지 않는 지점에서 멈추는 게 좋음
 
 # paths and filenames
 parser.add_argument('--outf', type=str, default='checkpoint', help='output folder')
 parser.add_argument('--model', type=str, default='', help='model path')
-parser.add_argument('--dataset', required=False, type=str, default="/media/ymxlzgy/Data/Dataset/3D-FRONT",
+parser.add_argument('--dataset', required=False, type=str, default="/home/commonscenes/FRONT/",
                     help="dataset path")
 parser.add_argument('--logf', default='logs', help='folder to save tensorboard logs')
-parser.add_argument('--exp', default='../experiments/layout_test', help='experiment name')
+parser.add_argument('--exp', default='../experiments/layout_test', help='experiment name') #학습된 모델이 저장되는 경로
 parser.add_argument('--room_type', default='bedroom', help='room type [bedroom, livingroom, diningroom, library, all]')
 
 # GCN parameters
@@ -50,9 +53,10 @@ parser.add_argument('--use_scene_rels', type=bool_flag, default=True, help="conn
 
 parser.add_argument('--use_E2', type=bool_flag, default=True, help="if use relation encoder in the diffusion branch")
 parser.add_argument('--with_SDF', type=bool_flag, default=False)  # TODO
+#TODO
 parser.add_argument('--with_feats', type=bool_flag, default=False,
                     help="if true reads latent point features instead of pointsets."
-                         "If not existing, they get generated at the beginning.")  # TODO
+                         "If not existing, they get generated at the beginning.")  #TODO
 parser.add_argument('--with_CLIP', type=bool_flag, default=True,
                     help="if use CLIP features. Set true for the full version")
 parser.add_argument('--shuffle_objs', type=bool_flag, default=True, help="shuffle objs of a scene")
@@ -64,8 +68,10 @@ parser.add_argument('--num_box_params', default=6, type=int, help="number of the
 parser.add_argument('--workers', type=int, help='number of data loading workers', default=4)
 parser.add_argument('--weight_D_box', default=0.1, type=float, help="Box Discriminator")
 parser.add_argument('--with_changes', default=True, type=bool_flag)
+
 parser.add_argument('--loadmodel', default=False, type=bool_flag)
 parser.add_argument('--loadepoch', default=90, type=int, help='only valid when loadmodel is true')
+
 parser.add_argument('--with_E2', default=True, type=bool_flag)
 parser.add_argument('--replace_latent', default=True, type=bool_flag)
 parser.add_argument('--network_type', default='v2_full', choices=['v2_box', 'v2_full', 'v1_box', 'v1_full'], type=str)
@@ -76,7 +82,7 @@ parser.add_argument('--vis_num', type=int, default=8, help='for visualization in
 
 args = parser.parse_args()
 print(args)
-
+# python train_3dfront.py --room_type livingroom --dataset /mnt/dataset/FRONT --residual True --network_type v2_full --with_SDF True --with_CLIP True --batchSize 8 --workers 8 --loadmodel False --nepoch 10000 --large False
 
 def parse_data(data):
     enc_objs, enc_triples, enc_tight_boxes, enc_objs_to_scene, enc_triples_to_scene = data['encoder']['objs'], \
@@ -87,15 +93,15 @@ def parse_data(data):
                                                                                       data['encoder'][
                                                                                           'triple_to_scene']
     if args.with_feats:
-        encoded_enc_f = data['encoder']['feats']
-        encoded_enc_f = encoded_enc_f.cuda()
+        encoded_enc_f = data['encoder']['feats'] #사전 인코딩된 latent point features를 가져옴.
+        encoded_enc_f = encoded_enc_f.cuda() #텐서를 GPU로 이동
 
     encoded_enc_text_feat = None
     encoded_enc_rel_feat = None
     encoded_dec_text_feat = None
     encoded_dec_rel_feat = None
     if args.with_CLIP:
-        encoded_enc_text_feat = data['encoder']['text_feats'].cuda()
+        encoded_enc_text_feat = data['encoder']['text_feats'].cuda() #텐서를 GPU로 이동
         encoded_enc_rel_feat = data['encoder']['rel_feats'].cuda()
         encoded_dec_text_feat = data['decoder']['text_feats'].cuda()
         encoded_dec_rel_feat = data['decoder']['rel_feats'].cuda()
@@ -125,7 +131,7 @@ def parse_data(data):
     dec_scene_nodes = dec_objs == 0
     if not args.with_feats:
         with torch.no_grad():
-            encoded_enc_f = None  # TODO
+            encoded_enc_f = None  # TODO #HJS
             encoded_dec_f = None  # TODO
 
     # set all scene (dummy) node encodings to zero
@@ -151,6 +157,7 @@ def parse_data(data):
         raise NotImplementedError
 
     # limit the angle bin range from 0 to 24
+    # enc_angles의 값이 0 ~ 23 범위 안에 있도록 보정됨
     enc_angles = enc_tight_boxes[:, 6].long() - 1
     enc_angles = torch.where(enc_angles > 0, enc_angles, torch.zeros_like(enc_angles))
     enc_angles = torch.where(enc_angles < 24, enc_angles, torch.zeros_like(enc_angles))
@@ -175,12 +182,12 @@ def train():
 
     print(torch.__version__)
 
-    random.seed(args.manualSeed)
-    torch.manual_seed(args.manualSeed)
+    random.seed(args.manualSeed) # Python 기본 random 모듈의 시드 설정
+    torch.manual_seed(args.manualSeed) # PyTorch의 시드 설정. 랜덤성을 통제. PyTorch 내부의 텐서 초기화, 데이터 샘플링, 모델 학습 중 발생하는 랜덤성을 고정.
 
     # instantiate scene graph dataset for training
-    dataset = ThreedFrontDatasetSceneGraph(
-        root=args.dataset,
+    dataset = ThreedFrontDatasetSceneGraph( #dataset/threedfront_dataset.py에서 갖고 옴
+        root=args.dataset, # /mnt/dataset/FRONT
         split='train_scans',
         shuffle_objs=args.shuffle_objs,
         use_SDF=args.with_SDF,
@@ -195,11 +202,13 @@ def train():
         recompute_clip=False)
 
     collate_fn = dataset.collate_fn_vaegan_points
-    # instantiate data loader from dataset
+    # instantiate data loader from dataset # 모델 학습에 맞게 배치(batch) 단위로 로드
+    # 학습 전에 배치사이즈 결정 및 결정에 따라 데이터셋 개수 로드
+    # 배치를 collate_fn으로 딕셔너리 형태로 저장 # DataLoader에서 배치 인자를 자동으로 전달
     dataloader = torch.utils.data.DataLoader(
         dataset,
-        batch_size=args.batchSize,
-        collate_fn=collate_fn,
+        batch_size=args.batchSize, # 한 번의 학습에 사용할 샘플 개수
+        collate_fn=collate_fn, # 복잡한 데이터 구조를 가져서 사용자 정의가 필요함.
         shuffle=True,
         num_workers=int(args.workers))
 
@@ -222,12 +231,15 @@ def train():
 
     if args.loadmodel:
         model.load_networks(exp=args.exp, epoch=args.loadepoch, restart_optim=False)
+        # model/VAE 안에 load_networks() 함수 호출
+        # exp=args.exp => 학습된 모델이 저장되는 경로
+        # checkpoint: 학습 중간 결과를 저장하는 모델 파일 (.pth)
 
     ## From Graph-to-3D
     # instantiate a relationship discriminator that considers the boxes and the semantic labels
     # if the loss weight is larger than zero
     # also create an optimizer for it
-    if args.weight_D_box > 0:
+    if args.weight_D_box > 0: #box discriminator weight
         boxD = BoxDiscriminator(6, num_relationships, num_classes)
         optimizerDbox = optim.Adam(filter(lambda p: p.requires_grad, boxD.parameters()), lr=args.auxlr,
                                    betas=(0.9, 0.999))
@@ -236,11 +248,12 @@ def train():
 
     ## From Graph-to-3D
     # instantiate auxiliary discriminator for shape and a respective optimizer
-    shapeClassifier = ShapeAuxillary(256, len(dataset.cat))
+    shapeClassifier = ShapeAuxillary(256, len(dataset.cat)) # 모델 호출 시 자동으로 forward() 실행됨
     shapeClassifier = shapeClassifier.cuda()
     shapeClassifier.train()
     optimizerShapeAux = optim.Adam(filter(lambda p: p.requires_grad, shapeClassifier.parameters()), lr=args.auxlr,
                                    betas=(0.9, 0.999))
+
 
     # initialize tensorboard writer
     writer = SummaryWriter(args.exp + "/" + args.logf)
@@ -250,6 +263,10 @@ def train():
         params = filter(lambda p: p.requires_grad, list(model.parameters()))
         optimizer_bl = optim.Adam(params, lr=args.auxlr)
         optimizer_bl.step()
+    # v1_box: Shape와 Bounding Box의 잠재 공간(Latent Space)이 분리
+    # v1_full: shared - Shape와 Bounding Box가 공유된 잠재 공간(Latent Space)
+    # v2_box
+    # v2_full: shared - Shape와 Bounding Box가 공유된 잠재 공간(Latent Space)
 
     print("---- Model and Dataset built ----")
 
@@ -257,11 +274,12 @@ def train():
         os.makedirs(args.exp + "/" + args.outf)
 
     # save parameters so that we can read them later on evaluation
+    # json 형태로 arguments parameters들을 저장함.
     with open(os.path.join(args.exp, 'args.json'), 'w') as f:
         json.dump(args.__dict__, f, indent=2)
     print("Saving all parameters under:")
     print(os.path.join(args.exp, 'args.json'))
-
+    
     torch.autograd.set_detect_anomaly(True)
     counter = model.counter if model.counter else 0
 

@@ -108,9 +108,11 @@ class VAE(nn.Module):
         elif self.type_ == 'v1_full':
             print()
             ckpt = torch.load(os.path.join(exp, 'checkpoint', 'model{}.pth'.format(epoch))).state_dict()
+            # epoch=10이면, 체크포인트 파일은 'model10.pth'를 불러오게 됨
             self.vae.load_state_dict(
                 ckpt,
                 strict=strict
+                # strict=True이면 모델을 불러올 때 모든 파라미터가 정확히 일치해야만 로드
             )
         elif self.type_ == 'v2_box':
             self.vae_box.load_state_dict(
@@ -140,6 +142,7 @@ class VAE(nn.Module):
             self.vae_v2.Diff.vqvae.load_state_dict(diff_state_dict['vqvae'])
             self.vae_v2.Diff.df.load_state_dict(diff_state_dict['df'])
 
+            # restart_optim=False → 이전에 학습된 옵티마이저 상태를 불러와서 학습을 이어서 진행 가능.
             if not restart_optim:
                 import torch.optim as optim
                 self.vae_v2.optimizerFULL.load_state_dict(diff_state_dict['opt'])
