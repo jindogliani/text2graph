@@ -82,7 +82,12 @@ parser.add_argument('--vis_num', type=int, default=8, help='for visualization in
 
 args = parser.parse_args()
 print(args)
-# python train_3dfront.py --room_type livingroom --dataset /mnt/dataset/FRONT --residual True --network_type v2_full --with_SDF True --with_CLIP True --batchSize 8 --workers 8 --loadmodel False --nepoch 10000 --large False
+# python train_3dfront.py --room_type livingroom --dataset /mnt/dataset/FRONT --residual True --network_type v2_full --with_SDF True --with_CLIP True --batchSize 8 --workers 8 --loadmodel True --loadepoch 15 --nepoch 10000 --large False
+
+# python train_3dfront.py --room_type livingroom --dataset /mnt/dataset/FRONT --residual True 
+# --network_type v2_full --with_SDF True --with_CLIP True 
+# v1_box: Graph-to-Box, v1_full: Graph-to-3D (DeepSDF version) v2_box:layout branch of CommonScenes, v2_full: CommonScenes
+# --batchSize 8 --workers 8 --loadmodel False --nepoch 10000 --large False
 
 def parse_data(data):
     enc_objs, enc_triples, enc_tight_boxes, enc_objs_to_scene, enc_triples_to_scene = data['encoder']['objs'], \
@@ -221,6 +226,9 @@ def train():
     except OSError:
         pass
     # instantiate the model
+    # residual=args.residual => distribution_before가 True이면 GCN 이전에 분포를 적용하고, False이면 GCN 이후에 적용
+    # 잠재 공간의 확률 분포(일반적으로 가우시안 분포) # 분포에서 샘플링함으로써 같은 입력에 대해서도 약간씩 다른 출력을 생성
+    # KL 발산(Kullback-Leibler divergence)을 통해 잠재 분포가 표준 정규 분포에 가까워지도록 유도
     model = VAE(root=args.dataset, type=args.network_type, diff_opt=args.diff_yaml, vocab=dataset.vocab,
                 replace_latent=args.replace_latent, with_changes=args.with_changes, residual=args.residual,
                 gconv_pooling=args.pooling, with_angles=args.with_angles, num_box_params=args.num_box_params,
@@ -229,7 +237,7 @@ def train():
     if torch.cuda.is_available():
         model = model.cuda()
 
-    if args.loadmodel:
+    if args.loadmodel: # 학습된 모델을 불러오는 경우
         model.load_networks(exp=args.exp, epoch=args.loadepoch, restart_optim=False)
         # model/VAE 안에 load_networks() 함수 호출
         # exp=args.exp => 학습된 모델이 저장되는 경로
@@ -253,16 +261,19 @@ def train():
     shapeClassifier.train()
     optimizerShapeAux = optim.Adam(filter(lambda p: p.requires_grad, shapeClassifier.parameters()), lr=args.auxlr,
                                    betas=(0.9, 0.999))
-
-
+    # parameters(): PyTorch에서 모든 nn.Module 클래스(모든 신경망 모델의 기본 클래스)에 내장된 메소드 # 모델의 모든 학습 가능한 파라미터(가중치와 편향)를 반환
+    # filter(): 주어진 함수를 만족하는 요소만 추출
+    # lambda p: p.requires_grad: 모든 파라미터에 대해 requires_grad가 True인 것만 추출 # requires_grad: 파라미터가 학습 가능한지 여부를 결정
     # initialize tensorboard writer
     writer = SummaryWriter(args.exp + "/" + args.logf)
 
     # optimizer for model v1 and v2_box. if it is v2_full, use its own optimizer.
     if args.network_type != 'v2_full':
         params = filter(lambda p: p.requires_grad, list(model.parameters()))
-        optimizer_bl = optim.Adam(params, lr=args.auxlr)
-        optimizer_bl.step()
+        optimizer_bl = optim.Adam(params, lr=args.auxlr) # auxlr: 학습률(Learning Rate) 얼마나 빠르게 학습할지를 결정
+        optimizer_bl.step() # optimizer_bl: VAE 모델의 가중치를 업데이트하는 역할
+        # 옵티마이저는 계산된 Loss의 기울기(gradient)를 사용하여 모델의 파라미터를 업데이트
+
     # v1_box: Shape와 Bounding Box의 잠재 공간(Latent Space)이 분리
     # v1_full: shared - Shape와 Bounding Box가 공유된 잠재 공간(Latent Space)
     # v2_box
@@ -281,7 +292,9 @@ def train():
     print(os.path.join(args.exp, 'args.json'))
     
     torch.autograd.set_detect_anomaly(True)
+    # 모델의 파라미터에 대한 기울기(gradient)를 계산하고 업데이트하는 과정에서 발생하는 문제를 자동으로 감지하고 디버깅하는 기능
     counter = model.counter if model.counter else 0
+    # 모델의 학습 횟수를 카운트하는 변수
 
     print("---- Starting training loop! ----")
     iter_start_time = time.time()
@@ -301,7 +314,7 @@ def train():
                 continue
 
             if args.network_type != 'v2_full':
-                optimizer_bl.zero_grad()
+                optimizer_bl.zero_grad() # zero_grad()는 옵티마이저에 연결된 모든 파라미터의 기울기를 0으로 초기화
             else:
                 model.vae_v2.optimizerFULL.zero_grad()
             # v2 also uses this
@@ -458,6 +471,7 @@ def train():
                 loss_diff = model.vae_v2.Diff.get_current_errors()
                 model.vae_v2.visualizer.print_current_errors(writer, counter, loss_diff, t)
                 if counter % 1000 == 0:
+                    # DDIM 샘플링은 Diffusion 모델에서 생성 과정을 가속화하는 샘플링 기법
                     model.vae_v2.Diff.gen_shape_after_foward(num_obj=args.vis_num)
                     model.vae_v2.visualizer.display_current_results(writer, model.vae_v2.Diff.get_current_visuals(
                         dataset.classes_r, obj_and_shape[0].detach().cpu().numpy(), num_obj=args.vis_num),

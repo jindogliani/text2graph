@@ -16,11 +16,13 @@ from model.VAEGAN_V2FULL import Sg2ScVAEModel as v2_full
 
 
 class VAE(nn.Module):
-
+    # diff_opt는 "diffusion options"의 약자
     def __init__(self, root="../GT",type='v1_box', diff_opt = '../config/v2_full.yaml', vocab=None, replace_latent=False, with_changes=True, distribution_before=True,
                  residual=False, gconv_pooling='avg', with_angles=False, num_box_params=6, lr_full=None, deepsdf=False, clip=True, with_E2=True):
         super().__init__()
         assert type in ['v1_box', 'v1_full', 'v2_box', 'v2_full'], '{} is not included'.format(type)
+        # v1_box: Graph-to-Box, v1_full: Graph-to-3D (DeepSDF version)
+        # v2_box:layout branch of CommonScenes, v2_full: CommonScenes
 
         self.type_ = type
         self.vocab = vocab
@@ -33,7 +35,7 @@ class VAE(nn.Module):
             self.vae_box = v1_box(vocab, embedding_dim=64, decoder_cat=True, mlp_normalization="batch",
                                input_dim=num_box_params, replace_latent=replace_latent, use_angles=with_angles,
                                residual=residual, gconv_pooling=gconv_pooling, gconv_num_layers=5)
-        elif self.type_ == 'v1_full':
+        elif self.type_ == 'v1_full': # Graph-to-3D (DeepSDF version) # 장면 그래프 → VAE 인코더 → 잠재 벡터 → VAE 디코더 → DeepSDF 잠재 코드 → DeepSDF 디코더 → 3D 형상
             self.classes_ = sorted(list(set(self.vocab['object_idx_to_name'])))
             self.v1code_base = os.path.join(self.v1full_database, 'Codes')
             self.v1mesh_base = os.path.join(self.v1full_database, 'Meshes')
@@ -42,8 +44,10 @@ class VAE(nn.Module):
             self.code_dict = {}
             for id_name in id_names:
                 latent_code = torch.load(os.path.join(self.v1code_base, id_name, 'sdf.pth'), map_location="cpu")[0]
-                latent_code = latent_code.detach().numpy()
+                latent_code = latent_code.detach().numpy() # DeepSDF 네트워크에서 학습된 잠재 코드 저장
                 self.code_dict[id_name] = latent_code[0]
+            # assert: 특정 조건이 참인지 확인하고, 만약 조건이 거짓이면 프로그램을 중단
+            # distribution_before가 True이면 GCN 이전에 분포를 적용하고, False이면 GCN 이후에 적용
             assert distribution_before is not None and replace_latent is not None and with_changes is not None
             self.vae = v1_full(vocab, embedding_dim=128, decoder_cat=True, mlp_normalization="batch",
                               gconv_num_layers=5, gconv_num_shared_layer=5, with_changes=with_changes, use_angles=with_angles,
@@ -71,6 +75,9 @@ class VAE(nn.Module):
                      manipulated_nodes):
 
         if self.type_ == 'v1_full':
+            # mu, logvar: 잠재 공간의 분포 매개변수
+            # boxes, angles, obj_and_shape: 모든 객체(변경된 객체 포함)의 예측값
+            # orig_gt_boxes, orig_gt_angles, orig_gt_shapes: 원본 데이터
             mu, logvar, orig_gt_boxes, orig_gt_angles, orig_gt_shapes, orig_boxes, orig_angles, orig_shapes, boxes, angles, obj_and_shape, keep = \
                 self.vae.forward(enc_objs, enc_triples, enc_boxes, enc_angles, enc_shapes, attributes, enc_objs_to_scene,
                                  dec_objs, dec_triples, dec_boxes, dec_angles, dec_shapes, dec_attributes, dec_objs_to_scene,
@@ -93,12 +100,16 @@ class VAE(nn.Module):
             return mu_boxes, logvar_boxes, None, None, orig_gt_boxes, orig_gt_angles, None, orig_boxes, orig_angles, None, boxes, angles, None, keep
 
         elif self.type_ == 'v2_full':
+            # mu, logvar: 잠재 공간의 분포 매개변수
+            # orig_gt_boxes, orig_gt_angles, orig_gt_shapes: 원본 데이터
+            # orig_boxes, orig_angles: 변경되지 않은 객체 예측값 # boxes, angles: 변경된 객체의 예측값 # obj_and_shape: 모든 객체(변경된 객체 포함)의 예측값
             mu, logvar, orig_gt_boxes, orig_gt_angles, orig_gt_shapes, orig_boxes, orig_angles, boxes, angles, obj_and_shape, keep = self.vae_v2.forward(
                 enc_objs, enc_triples, enc_boxes, encoded_enc_text_feat, encoded_enc_rel_feat, attributes, enc_objs_to_scene, dec_objs, dec_objs_grained, dec_triples, dec_boxes,
                 encoded_dec_text_feat, encoded_dec_rel_feat, dec_attributes, dec_objs_to_scene, missing_nodes, manipulated_nodes, dec_sdfs, enc_angles, dec_angles)
 
             return mu, logvar, None, None, orig_gt_boxes, orig_gt_angles, orig_gt_shapes, orig_boxes, orig_angles, None, boxes, angles, obj_and_shape, keep
-
+    
+    # 기존에 학습된 모델 로드
     def load_networks(self, exp, epoch, strict=True, restart_optim=False):
         if self.type_ == 'v1_box':
             self.vae_box.load_state_dict(
@@ -160,7 +171,9 @@ class VAE(nn.Module):
                 self.vae_v2.Diff.vqvae_module = self.vae_v2.Diff.vqvae
             print(colored('[*] v2_shape successfully restored from: %s' % os.path.join(exp, 'checkpoint', 'model{}.pth'.format(epoch)), 'blue'))
 
-    def compute_statistics(self, exp, epoch, stats_dataloader, force=False):
+    # 통계 정보 계산 또는 로드 # 평가에서 잠재 공간의 통계적 특성을 분석하여 모델이 학습한 분포를 이해
+    # mean_est_box: 잠재 공간의 평균 벡터 cov_est_box: 잠재 공간의 공분산 행렬
+    def compute_statistics(self, exp, epoch, stats_dataloader, force=False): # eval, inference 과정에서 사용
         box_stats_f = os.path.join(exp, 'checkpoint', 'model_stats_box_{}.pkl'.format(epoch))
         stats_f = os.path.join(exp, 'checkpoint', 'model_stats_{}.pkl'.format(epoch))
         if self.type_ == 'v1_box':
@@ -193,6 +206,7 @@ class VAE(nn.Module):
                 self.mean_est, self.cov_est = self.vae_v2.collect_train_statistics(stats_dataloader)
                 pickle.dump([self.mean_est, self.cov_est], open(stats_f, 'wb'))
 
+    # 이미 학습된 디코더를 사용하여 잠재 백터로부터 3D 객체 생성
     def decoder_with_changes_boxes_and_shape(self, z_box, z_shape, objs, triples, encoded_dec_text_feat, encoded_dec_rel_feat, dec_sdfs, attributes, missing_nodes, manipulated_nodes, box_data=None, gen_shape=False):
         if self.type_ == 'v1_full':
             boxes, feats, keep = self.vae.decoder_with_changes(z_box, objs, triples, attributes, missing_nodes, manipulated_nodes)
@@ -216,6 +230,7 @@ class VAE(nn.Module):
     def decoder_with_changes_shape(self, z, objs, triples, attributes, missing_nodes, manipulated_nodes, atlas):
         if self.type_ == 'v1_full':
             return None, None
+    
     def decoder_boxes_and_shape(self, z_box, z_shape, objs, triples, attributes, atlas=None):
         angles = None
         if self.type_ == 'v1_full':
@@ -261,6 +276,7 @@ class VAE(nn.Module):
             return  None, None, None
         return boxes, angles, keep
 
+    # 이미 학습된 인코더를 사용하여 잠재 벡터 계산 평가/추론 단계에서 호출됨
     def encode_box_and_shape(self, objs, triples, encoded_enc_text_feat, encoded_enc_rel_feat, feats, boxes, angles=None, attributes=None):
         if not self.with_angles:
             angles = None
@@ -276,7 +292,6 @@ class VAE(nn.Module):
             return None, None
 
     def encode_box(self, objs, triples, encoded_enc_text_feat, encoded_enc_rel_feat, boxes, angles=None, attributes=None):
-
         if self.type_ == 'v1_box' or self.type_ == 'v2_box':
             z, log_var = self.vae_box.encoder(objs, triples, boxes, attributes, encoded_enc_text_feat, encoded_enc_rel_feat, angles)
         elif self.type_ == 'v2_full':

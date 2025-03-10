@@ -66,6 +66,7 @@ class Sg2ScVAEModel(nn.Module):
         num_preds = len(self.edge_list)
 
         # build encoder and decoder nets
+        # 객체 ID를 obj_embedding_dim 차원의 벡터로 변환하는 임베딩 레이어를 정의
         self.obj_embeddings_ec = nn.Embedding(num_objs + 1, obj_embedding_dim)
         self.pred_embeddings_ec = nn.Embedding(num_preds, embedding_dim * 2)
         self.obj_embeddings_dc = nn.Embedding(num_objs + 1, obj_embedding_dim)
@@ -188,30 +189,41 @@ class Sg2ScVAEModel(nn.Module):
         s, p, o = [x.squeeze(1) for x in [s, p, o]]  # Now have shape (T,)
         edges = torch.stack([s, o], dim=1)  # Shape is (T, 2)
 
+        # 객체 ID(objs)를 임베딩 레이어에 통과시켜 벡터 표현(obj_vecs)
         obj_vecs = self.obj_embeddings_ec(objs)
         pred_vecs = self.pred_embeddings_ec(p)
         d3_vecs = self.d3_embeddings(boxes_gt)
         if self.clip:
+            # 텍스트 특징(enc_text_feat)과 객체 벡터(obj_vecs)를 연결
             obj_vecs_ = torch.cat([enc_text_feat, obj_vecs], dim=1)
+            # 관계 특징(enc_rel_feat)과 관계 벡터(pred_vecs)를 연결
             pred_vecs_ = torch.cat([enc_rel_feat, pred_vecs], dim=1)
         else:
+            # 텍스트 특징이 없으면 객체 벡터와 관계 벡터만 연결
             obj_vecs_, pred_vecs_ = obj_vecs, pred_vecs
         if self.use_angles:
+            # 각도 정보(angles_gt)를 임베딩 레이어에 통과시켜 벡터 표현(angle_vecs)
             angle_vecs = self.angle_embeddings(angles_gt)
+            # 객체 벡터, 3D 박스 좌표 벡터, 각도 벡터를 연결
             obj_vecs_ = torch.cat([obj_vecs_, d3_vecs, angle_vecs], dim=1)
         else:
+            # 객체 벡터, 3D 박스 좌표 벡터를 연결
             obj_vecs_ = torch.cat([obj_vecs_, d3_vecs], dim=1)
 
+        # 객체 벡터와 관계 벡터를 입력으로 받아 그래프 신경망에 통과시킴
         obj_vecs_, pred_vecs_ = self.gconv_net_ec_box(obj_vecs_, pred_vecs_, edges)
 
+        # 객체 벡터를 입력으로 받아 분포 매개변수인 평균과 분산을 계산
         obj_vecs_3d = self.mean_var(obj_vecs_)
         mu = self.mean(obj_vecs_3d)
         logvar = self.var(obj_vecs_3d)
 
         if self.use_angles:
+            # 각도 정보를 입력으로 받아 분포 매개변수인 평균과 분산을 계산
             obj_vecs_angle = self.angle_mean_var(obj_vecs_)
             mu_angle = self.angle_mean(obj_vecs_angle)
             logvar_angle = self.angle_var(obj_vecs_angle)
+            # 평균과 분산을 연결
             mu = torch.cat([mu, mu_angle], dim=1)
             logvar = torch.cat([logvar, logvar_angle], dim=1)
 
