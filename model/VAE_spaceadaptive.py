@@ -2,10 +2,12 @@ import json
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 import pickle
 import os
 import glob
+import numpy as np
 
 import trimesh
 from termcolor import colored
@@ -18,7 +20,8 @@ from model.VAEGAN_V2FULL import Sg2ScVAEModel as v2_full
 class VAE(nn.Module):
     # diff_opt는 "diffusion options"의 약자
     def __init__(self, root="../GT",type='v1_box', diff_opt = '../config/v2_full.yaml', vocab=None, replace_latent=False, with_changes=True, distribution_before=True,
-                 residual=False, gconv_pooling='avg', with_angles=False, num_box_params=6, lr_full=None, deepsdf=False, clip=True, with_E2=True):
+                 residual=False, gconv_pooling='avg', with_angles=False, num_box_params=6, lr_full=None, deepsdf=False, clip=True, with_E2=True,
+                 use_real_space=False, real_space_weight=0.3):
         super().__init__()
         assert type in ['v1_box', 'v1_full', 'v2_box', 'v2_full'], '{} is not included'.format(type)
         # v1_box: Graph-to-Box, v1_full: Graph-to-3D (DeepSDF version)
@@ -29,6 +32,12 @@ class VAE(nn.Module):
         self.with_angles = with_angles
         self.epoch = 0
         self.v1full_database = os.path.join(root, "DEEPSDF_reconstruction")
+        
+        # 현실 공간 관련 파라미터 추가
+        self.use_real_space = use_real_space
+        self.real_space_weight = real_space_weight
+        self.real_space_embeddings = None
+        self.real_space_data = None
 
         if self.type_ == 'v1_box':
             assert replace_latent is not None
@@ -69,10 +78,207 @@ class VAE(nn.Module):
 
     def set_cuda(self):
         self.vae_v2.set_cuda()
+        if self.real_space_embeddings is not None:
+            self.real_space_embeddings = {k: v.cuda() for k, v in self.real_space_embeddings.items()}
+
+    # 현실 공간 데이터 로드 및 처리
+    def load_real_space_data(self, real_space_data_path):
+        """
+        현실 공간 데이터를 로드하고 처리하는 메서드
+        
+        Args:
+            real_space_data_path (str): 현실 공간 데이터 파일 경로
+            
+        Returns:
+            dict: 처리된 현실 공간 데이터
+        """
+        with open(real_space_data_path, 'r') as f:
+            real_space_data = json.load(f)
+        
+        self.real_space_data = real_space_data
+        print(f"현실 공간 데이터 로드 완료: {len(real_space_data)} 공간")
+        return real_space_data
+    
+    def encode_real_space(self, real_space_id=None):
+        """
+        현실 공간 데이터를 인코딩하여 임베딩 벡터를 생성하는 메서드
+        
+        Args:
+            real_space_id (str, optional): 인코딩할 특정 현실 공간 ID. None이면 모든 공간 인코딩
+            
+        Returns:
+            dict: 현실 공간 ID를 키로, 임베딩 벡터를 값으로 하는 딕셔너리
+        """
+        if self.real_space_data is None:
+            print("현실 공간 데이터가 로드되지 않았습니다. load_real_space_data()를 먼저 호출하세요.")
+            return None
+        
+        # 인코딩할 공간 ID 목록 결정
+        space_ids = [real_space_id] if real_space_id else list(self.real_space_data.keys())
+        embeddings = {}
+        
+        for space_id in space_ids:
+            if space_id not in self.real_space_data:
+                print(f"경고: {space_id} ID를 가진 현실 공간이 데이터에 없습니다.")
+                continue
+            
+            space_data = self.real_space_data[space_id]
+            
+            # 객체 클래스, 바운딩 박스, 관계 추출
+            objs = []
+            boxes = []
+            triples = []
+            
+            # 객체 정보 처리
+            for obj_id, obj_info in enumerate(space_data["objects"]):
+                obj_class = obj_info["class"]
+                if obj_class in self.vocab["object_name_to_idx"]:
+                    class_idx = self.vocab["object_name_to_idx"][obj_class]
+                    objs.append(class_idx)
+                    
+                    # 바운딩 박스 정보 처리
+                    box = obj_info["bbox"]
+                    if self.with_angles:
+                        angle = obj_info.get("angle", 0)
+                        box.append(angle)
+                    boxes.append(box)
+                else:
+                    print(f"경고: {obj_class} 클래스가 어휘에 없습니다.")
+            
+            # 관계 정보 처리
+            for rel in space_data["relationships"]:
+                subj_idx = rel["subject"]
+                obj_idx = rel["object"]
+                rel_type = rel["relation"]
+                
+                if rel_type in self.vocab["pred_name_to_idx"]:
+                    rel_idx = self.vocab["pred_name_to_idx"][rel_type]
+                    triples.append([subj_idx, rel_idx, obj_idx])
+                else:
+                    print(f"경고: {rel_type} 관계가 어휘에 없습니다.")
+            
+            # 텐서 변환
+            objs_tensor = torch.tensor(objs, dtype=torch.long)
+            boxes_tensor = torch.tensor(boxes, dtype=torch.float)
+            triples_tensor = torch.tensor(triples, dtype=torch.long)
+            
+            # 현실 공간 인코딩
+            if self.type_ == 'v1_box' or self.type_ == 'v2_box':
+                mu, logvar = self.vae_box.encoder(objs_tensor.cuda(), triples_tensor.cuda(), boxes_tensor.cuda(), None)
+                embedding = mu  # 평균 벡터만 사용
+            elif self.type_ == 'v1_full':
+                mu, logvar = self.vae.encoder(objs_tensor.cuda(), triples_tensor.cuda(), boxes_tensor.cuda(), None)
+                embedding = mu
+            elif self.type_ == 'v2_full':
+                # CLIP 특성이 필요한 경우 더미 데이터 생성
+                if self.vae_v2.clip:
+                    dummy_text_feats = torch.zeros((len(objs), 512)).cuda()
+                    dummy_rel_feats = torch.zeros((len(triples), 512)).cuda()
+                    mu, logvar = self.vae_v2.encoder(objs_tensor.cuda(), triples_tensor.cuda(), boxes_tensor.cuda(), 
+                                                    None, dummy_text_feats, dummy_rel_feats)
+                else:
+                    mu, logvar = self.vae_v2.encoder(objs_tensor.cuda(), triples_tensor.cuda(), boxes_tensor.cuda(), None)
+                embedding = mu
+            
+            embeddings[space_id] = embedding
+        
+        self.real_space_embeddings = embeddings
+        return embeddings
+    
+    def condition_with_real_space(self, real_space_embedding, z, alpha=None):
+        """
+        가상 공간 생성 시 현실 공간 임베딩으로 조건화하는 메서드
+        
+        Args:
+            real_space_embedding (torch.Tensor): 현실 공간 임베딩
+            z (torch.Tensor): 가상 공간 잠재 벡터
+            alpha (float, optional): 현실 공간과 가상 공간의 혼합 비율 (0~1). None이면 self.real_space_weight 사용
+        
+        Returns:
+            torch.Tensor: 조건화된 잠재 벡터
+        """
+        if alpha is None:
+            alpha = self.real_space_weight
+        
+        # 현실 공간 임베딩과 가상 공간 잠재 벡터를 혼합
+        conditioned_z = alpha * real_space_embedding + (1 - alpha) * z
+        
+        return conditioned_z
+    
+    def real_space_loss(self, z, real_space_embedding, boxes_pred, real_space_boxes_pred):
+        """
+        현실 공간 임베딩과 생성된 잠재 벡터 간의 손실을 계산하는 메서드
+        
+        Args:
+            z (torch.Tensor): 생성된 잠재 벡터
+            real_space_embedding (torch.Tensor): 현실 공간 임베딩
+            boxes_pred (torch.Tensor): 생성된 바운딩 박스
+            real_space_boxes_pred (torch.Tensor): 현실 공간 바운딩 박스
+            
+        Returns:
+            torch.Tensor: 계산된 손실값
+        """
+        # 1. 잠재 공간에서의 손실 - 현실 공간 임베딩과 생성된 잠재 벡터 간의 MSE 손실
+        latent_loss = F.mse_loss(z, real_space_embedding, reduction='mean')
+        
+        # 2. 바운딩 박스 공간에서의 손실 - 현실 공간 바운딩 박스와 생성된 바운딩 박스 간의 손실
+        # 충돌 방지를 위한 손실 (겹치는 영역에 페널티)
+        box_loss = 0.0
+        if boxes_pred is not None and real_space_boxes_pred is not None:
+            # 바운딩 박스 간 겹침 계산
+            box_loss = self.calculate_box_overlap_loss(boxes_pred, real_space_boxes_pred)
+        
+        # 가중치 적용 및 손실 결합
+        weighted_loss = (self.real_space_weight * latent_loss) + ((1 - self.real_space_weight) * box_loss)
+        
+        return weighted_loss
+    
+    def calculate_box_overlap_loss(self, boxes1, boxes2):
+        """
+        두 바운딩 박스 세트 간의 겹침을 계산하는 메서드
+        
+        Args:
+            boxes1 (torch.Tensor): 첫 번째 바운딩 박스 세트 [N, 6] (x, y, z, dx, dy, dz)
+            boxes2 (torch.Tensor): 두 번째 바운딩 박스 세트 [M, 6] (x, y, z, dx, dy, dz)
+            
+        Returns:
+            torch.Tensor: 겹침에 대한 손실값
+        """
+        # 바운딩 박스 형식: [x, y, z, dx, dy, dz]
+        # 각 바운딩 박스의 최소/최대 좌표 계산
+        boxes1_min = boxes1[:, :3] - boxes1[:, 3:] / 2  # [N, 3]
+        boxes1_max = boxes1[:, :3] + boxes1[:, 3:] / 2  # [N, 3]
+        
+        boxes2_min = boxes2[:, :3] - boxes2[:, 3:] / 2  # [M, 3]
+        boxes2_max = boxes2[:, :3] + boxes2[:, 3:] / 2  # [M, 3]
+        
+        # 모든 박스 쌍에 대한 겹침 계산
+        loss = 0.0
+        for i in range(boxes1.shape[0]):
+            for j in range(boxes2.shape[0]):
+                # 두 박스의 겹치는 영역 계산
+                overlap_min = torch.max(boxes1_min[i], boxes2_min[j])  # [3]
+                overlap_max = torch.min(boxes1_max[i], boxes2_max[j])  # [3]
+                
+                # 겹치는 영역이 있는지 확인
+                is_overlap = torch.all(overlap_min < overlap_max)
+                
+                if is_overlap:
+                    # 겹치는 영역의 부피 계산
+                    overlap_size = overlap_max - overlap_min  # [3]
+                    overlap_volume = torch.prod(overlap_size)
+                    
+                    # 손실에 추가
+                    loss += overlap_volume
+        
+        return loss if loss > 0 else torch.tensor(0.0).to(boxes1.device)
 
     def forward_mani(self, enc_objs, enc_triples, enc_boxes, enc_angles, enc_shapes, encoded_enc_text_feat, encoded_enc_rel_feat, attributes, enc_objs_to_scene, dec_objs, dec_objs_grained,
                      dec_triples, dec_boxes, dec_angles, dec_sdfs, dec_shapes, encoded_dec_text_feat, encoded_dec_rel_feat, dec_attributes, dec_objs_to_scene, missing_nodes,
-                     manipulated_nodes):
+                     manipulated_nodes, real_space_id=None):
+
+        # 현실 공간 임베딩 적용 (사용 설정된 경우)
+        use_real_space_embedding = self.use_real_space and real_space_id is not None and self.real_space_embeddings is not None
 
         if self.type_ == 'v1_full':
             # mu, logvar: 잠재 공간의 분포 매개변수
@@ -82,6 +288,11 @@ class VAE(nn.Module):
                 self.vae.forward(enc_objs, enc_triples, enc_boxes, enc_angles, enc_shapes, attributes, enc_objs_to_scene,
                                  dec_objs, dec_triples, dec_boxes, dec_angles, dec_shapes, dec_attributes, dec_objs_to_scene,
                                  missing_nodes, manipulated_nodes)
+            
+            # 현실 공간 임베딩 적용
+            if use_real_space_embedding:
+                real_space_emb = self.real_space_embeddings[real_space_id]
+                # 현실 공간 손실 계산 및 적용은 train() 함수에서 처리
 
             return mu, logvar, mu, logvar, orig_gt_boxes, orig_gt_angles, orig_gt_shapes, orig_boxes, orig_angles, orig_shapes, boxes, angles, obj_and_shape, keep
 
@@ -89,6 +300,11 @@ class VAE(nn.Module):
             mu_boxes, logvar_boxes, orig_gt_boxes, orig_gt_angles, orig_boxes, orig_angles, boxes, angles, keep = self.vae_box.forward(
                 enc_objs, enc_triples, enc_boxes, attributes, encoded_enc_text_feat, encoded_enc_rel_feat, enc_objs_to_scene, dec_objs, dec_triples, dec_boxes,
                 dec_attributes, dec_objs_to_scene, missing_nodes, manipulated_nodes, enc_angles, dec_angles)
+            
+            # 현실 공간 임베딩 적용
+            if use_real_space_embedding:
+                real_space_emb = self.real_space_embeddings[real_space_id]
+                # 현실 공간 손실 계산 및 적용은 train() 함수에서 처리
 
             return mu_boxes, logvar_boxes, None, None, orig_gt_boxes, orig_gt_angles, None, orig_boxes, orig_angles, None, boxes, angles, None, keep
 
@@ -96,20 +312,30 @@ class VAE(nn.Module):
             mu_boxes, logvar_boxes, orig_gt_boxes, orig_gt_angles, orig_boxes, orig_angles, boxes, angles, keep = self.vae_box.forward(
                 enc_objs, enc_triples, enc_boxes, encoded_enc_text_feat, encoded_enc_rel_feat, attributes, enc_objs_to_scene, dec_objs, dec_triples, dec_boxes,
                 encoded_dec_text_feat, encoded_dec_rel_feat, dec_attributes, dec_objs_to_scene, missing_nodes, manipulated_nodes, enc_angles, dec_angles)
+            
+            # 현실 공간 임베딩 적용
+            if use_real_space_embedding:
+                real_space_emb = self.real_space_embeddings[real_space_id]
+                # 현실 공간 손실 계산 및 적용은 train() 함수에서 처리
 
             return mu_boxes, logvar_boxes, None, None, orig_gt_boxes, orig_gt_angles, None, orig_boxes, orig_angles, None, boxes, angles, None, keep
-
+        
         elif self.type_ == 'v2_full':
-            # mu, logvar: 잠재 공간의 분포 매개변수
-            # orig_gt_boxes, orig_gt_angles, orig_gt_shapes: 원본 데이터
-            # orig_boxes, orig_angles: 변경되지 않은 객체 예측값 # boxes, angles: 변경된 객체의 예측값 # obj_and_shape: 모든 객체(변경된 객체 포함)의 예측값
-            mu, logvar, orig_gt_boxes, orig_gt_angles, orig_gt_shapes, orig_boxes, orig_angles, boxes, angles, obj_and_shape, keep = self.vae_v2.forward(
-                enc_objs, enc_triples, enc_boxes, encoded_enc_text_feat, encoded_enc_rel_feat, attributes, enc_objs_to_scene, dec_objs, dec_objs_grained, dec_triples, dec_boxes,
-                encoded_dec_text_feat, encoded_dec_rel_feat, dec_attributes, dec_objs_to_scene, missing_nodes, manipulated_nodes, dec_sdfs, enc_angles, dec_angles)
+            # 기존 forward 호출
+            mu, logvar, orig_gt_boxes, orig_gt_angles, orig_gt_shapes, orig_boxes, orig_angles, boxes, angles, obj_and_shape, keep = \
+                self.vae_v2.forward(enc_objs, enc_triples, enc_boxes, enc_text_feat=encoded_enc_text_feat, enc_rel_feat=encoded_enc_rel_feat, 
+                                   attributes=attributes, enc_objs_to_scene=enc_objs_to_scene, dec_objs=dec_objs, dec_objs_grained=dec_objs_grained,
+                                   dec_triples=dec_triples, dec=dec_boxes, dec_text_feat=encoded_dec_text_feat, dec_rel_feat=encoded_dec_rel_feat, 
+                                   dec_attributes=dec_attributes, dec_objs_to_scene=dec_objs_to_scene, missing_nodes=missing_nodes, 
+                                   manipulated_nodes=manipulated_nodes, dec_sdfs=dec_sdfs, enc_angles=enc_angles, dec_angles=dec_angles)
+            
+            # 현실 공간 임베딩 적용
+            if use_real_space_embedding:
+                real_space_emb = self.real_space_embeddings[real_space_id]
+                # 현실 공간 손실 계산 및 적용은 train() 함수에서 처리
+            
+            return mu, logvar, mu, logvar, orig_gt_boxes, orig_gt_angles, orig_gt_shapes, orig_boxes, orig_angles, orig_shapes, boxes, angles, obj_and_shape, keep
 
-            return mu, logvar, None, None, orig_gt_boxes, orig_gt_angles, orig_gt_shapes, orig_boxes, orig_angles, None, boxes, angles, obj_and_shape, keep
-    
-    # 기존에 학습된 모델 로드
     def load_networks(self, exp, epoch, strict=True, restart_optim=False):
         if self.type_ == 'v1_box':
             self.vae_box.load_state_dict(
