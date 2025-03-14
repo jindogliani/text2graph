@@ -38,9 +38,9 @@ class RIODatasetSceneGraph(data.Dataset):
                  use_scene_rels=False, data_len=None,
                  with_changes=True, vae_baseline=False,
                  scale_func='diag', eval=False, eval_type='addition',
-                 atlas=None, path2atlas=None, with_feats=False, with_CLIP=False,
+                 atlas=None, path2atlas=None, with_feats=False, with_CLIP=False, with_BERT=False,
                  seed=True, use_splits=False, large=False,
-                 use_rio27=False, recompute_feats=False, recompute_clip=False, use_canonical=False,
+                 use_rio27=False, recompute_feats=False, recompute_clip=False, recompute_bert=False, use_canonical=False,
                  crop_floor=False, center_scene_to_floor=False):
 
         # options currently not used in the experiments
@@ -51,12 +51,14 @@ class RIODatasetSceneGraph(data.Dataset):
         self.seed = seed
         self.with_feats = with_feats
         self.with_CLIP = with_CLIP
+        self.with_BERT = with_BERT
         self.atlas = atlas
         self.cond_model = None
         self.path2atlas = path2atlas
         self.large = large
         self.recompute_feats = recompute_feats
         self.recompute_clip = recompute_clip
+        self.recompute_bert = recompute_bert
 
         self.use_canonical = use_canonical
 
@@ -90,10 +92,7 @@ class RIODatasetSceneGraph(data.Dataset):
         # splitfile = os.path.join(self.root, '{}.txt'.format(split))
         # filelist = open(splitfile, "r").read().splitlines()
         # self.filelist = [file.rstrip() for file in filelist] # training list
-        
-        # 임시로 빈 리스트 설정
-        self.filelist = []
-        
+
         # list of relationship categories
         self.relationships = self.read_relationships(os.path.join(self.root, 'relationships.txt'))
 
@@ -110,13 +109,12 @@ class RIODatasetSceneGraph(data.Dataset):
             self.box_json_file = os.path.join(self.root, 'obj_boxes_val_refined.json')
             self.floor_json_file = os.path.join(self.root, 'floor_boxes_split_val.json')
 
-        # 임시로 빈 딕셔너리 설정
-        self.floor_data = {}
+        if self.crop_floor:
+            with open(self.floor_json_file, "r") as read_file:
+                self.floor_data = json.load(read_file)
 
-        # 임시로 빈 딕셔너리 설정
-        self.relationship_json = {}
-        self.objs_json = {}
-        self.tight_boxes_json = {}
+        self.relationship_json, self.objs_json, self.tight_boxes_json = \
+                self.read_relationship_json(self.rel_json_file, self.box_json_file)
 
         self.label_file = label_file
 
@@ -138,19 +136,26 @@ class RIODatasetSceneGraph(data.Dataset):
             self.vocab_rio27 = json.load(open(os.path.join(self.root, "classes_rio27.json"), "r"))
             self.vocab['object_idx_to_name'] = self.vocab_rio27['rio27_idx_to_name']
             self.vocab['object_name_to_idx'] = self.vocab_rio27['rio27_name_to_idx']
-        # self.mapping_full2rio27 = json.load(open(os.path.join(self.root, "mapping_full2rio27.json"), "r"))
-        self.mapping_full2rio27 = {}
+        self.mapping_full2rio27 = json.load(open(os.path.join(self.root, "mapping_full2rio27.json"), "r"))
 
         with open(self.catfile, 'r') as f:
             for line in f:
-                category = line.rstrip()
-                self.cat[category] = category
+                # 탭으로 구분된 부분에서 두 번째 항목(클래스 이름)만 가져옵니다.
+                parts = line.strip().split('\t')
+                if len(parts) > 1:
+                    category = parts[1].strip()
+                    self.cat[category] = category
+                else:
+                    # 탭이 없는 경우 전체 라인을 사용합니다.
+                    category = line.strip()
+                    self.cat[category] = category
         if not class_choice is None:
             self.cat = {k: v for k, v in self.cat.items() if k in class_choice}
 
         # "_scene_"-"windowsill": 0-160
         self.classes = dict(zip(sorted(self.cat), range(len(self.cat))))
         self.classes_r = dict(zip(self.classes.values(), self.classes.keys()))
+        print(self.classes)
 
         # we had to discard some underrepresented classes for the shape generation
         # either not part of shapenet, or limited and low quality samples in 3rscan
@@ -986,10 +991,8 @@ class RIODatasetSceneGraph(data.Dataset):
     def __len__(self):
         if self.data_len is not None:
             return self.data_len
-        elif len(self.scans) > 0:
-            return len(self.scans)
         else:
-            return 0
+            return len(self.scans)
 
 
 def collate_fn_vaegan(batch, use_points=False):
@@ -1126,30 +1129,28 @@ if __name__ == "__main__":
     # point_ae.eval()
     dataset = RIODatasetSceneGraph(
         root="/home/commonscenes/datasample/3DSSG/3DSSG",
-        root_3rscan="",
-        label_file='labels.instances.align.annotated.ply',
+        root_3rscan="/mnt/dataset/3RScan/data/3RScan",
+        label_file='labels.instances.align.annotated.v2.ply',
         npoints=1024,
         path2atlas="./experiments/atlasnet/model_70.pth",
-        split='train_scans',
+        split='test',
         shuffle_objs=True,
         use_points=False,
         use_scene_rels=True,
+        eval=False,
         with_changes=True,
         vae_baseline=False,
         with_feats=True,
+        with_BERT=False,
+        with_CLIP=False,
         large=True,
-        atlas=None,
+        atlas=None, # point_ae
         seed=False,
-        use_splits=False,
+        use_splits=True,
         use_rio27=False,
         use_canonical=True,
         crop_floor=False,
         center_scene_to_floor=False,
         recompute_feats=False)
-    
-    print("데이터셋 초기화 완료!")
-    print(f"데이터셋 크기: {len(dataset)}")
-    
-    # 데이터셋이 비어 있으므로 인덱싱 테스트는 건너뜁니다.
-    # a = dataset[10]
-    # print(a)
+    a = dataset[10]
+    print(a)

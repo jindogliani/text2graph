@@ -860,7 +860,7 @@ if __name__ == "__main__":
     # point_ae.eval()
     dataset = RIODatasetSceneGraph(
         root="/home/commonscenes/datasample/3DSSG/3DSSG",
-        root_3rscan="",
+        root_3rscan="/mnt/dataset/3RScan/data/3RScan",
         label_file='labels.instances.align.annotated.ply',
         npoints=1024,
         path2atlas="./experiments/atlasnet/model_70.pth",
