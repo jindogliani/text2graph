@@ -138,7 +138,7 @@ class RIODatasetSceneGraph(data.Dataset):
             self.cat = {k: v for k, v in self.cat.items() if k in class_choice}
 
         self.classes = dict(zip(sorted(self.cat), range(len(self.cat))))
-        print(self.classes)
+        # print(self.classes)
 
         # we had to discard some underrepresented classes for the shape generation
         # either not part of shapenet, or limited and low quality samples in 3rscan
@@ -861,7 +861,7 @@ if __name__ == "__main__":
     dataset = RIODatasetSceneGraph(
         root="/home/commonscenes/datasample/3DSSG/3DSSG",
         root_3rscan="/mnt/dataset/3RScan/data/3RScan",
-        label_file='labels.instances.align.annotated.ply',
+        label_file='labels.instances.align.annotated.v2.ply',
         npoints=1024,
         path2atlas="./experiments/atlasnet/model_70.pth",
         split='test',
@@ -874,7 +874,7 @@ if __name__ == "__main__":
         large=True,
         atlas=None,
         seed=False,
-        use_splits=False,
+        use_splits=True,
         use_rio27=False,
         use_canonical=True,
         crop_floor=False,

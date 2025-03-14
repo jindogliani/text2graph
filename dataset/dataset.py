@@ -155,7 +155,7 @@ class RIODatasetSceneGraph(data.Dataset):
         # "_scene_"-"windowsill": 0-160
         self.classes = dict(zip(sorted(self.cat), range(len(self.cat))))
         self.classes_r = dict(zip(self.classes.values(), self.classes.keys()))
-        print(self.classes)
+        # print(self.classes)
 
         # we had to discard some underrepresented classes for the shape generation
         # either not part of shapenet, or limited and low quality samples in 3rscan
@@ -415,6 +415,8 @@ class RIODatasetSceneGraph(data.Dataset):
         elif os.path.exists(os.path.join(self.root_3rscan, scan_id_no_split, "semseg.json")):
             semseg_file = os.path.join(self.root_3rscan, scan_id_no_split, "semseg.json")
         else:
+            # print(self.root_3rscan)
+            # print(scan_id_no_split)
             raise FileNotFoundError("Cannot find semseg.json file.")
 
         # instance2label, the whole instance ids in this scene e.g. {1: 'floor', 2: 'wall', 3: 'picture', 4: 'picture'}
@@ -995,128 +997,127 @@ class RIODatasetSceneGraph(data.Dataset):
             return len(self.scans)
 
 
-def collate_fn_vaegan(batch, use_points=False):
-    """
-    Collate function to be used when wrapping a RIODatasetSceneGraph in a
-    DataLoader. Returns a dictionary
-    """
+    def collate_fn_vaegan(self, batch, use_points=False):
+        """
+        Collate function to be used when wrapping a RIODatasetSceneGraph in a
+        DataLoader. Returns a dictionary
+        """
 
-    out = {}
+        out = {}
 
-    out['scene_points'] = []
-    out['scan_id'] = []
-    out['instance_id'] = []
-    out['split_id'] = []
+        out['scene_points'] = []
+        out['scan_id'] = []
+        out['instance_id'] = []
+        out['split_id'] = []
 
-    out['missing_nodes'] = []
-    out['missing_nodes_decoder'] = []
-    out['manipulated_nodes'] = []
-    global_node_id = 0
-    global_dec_id = 0
-
-    for i in range(len(batch)):
-        if batch[i] == -1:
-            return -1
-        # notice only works with single batches
-        out['scan_id'].append(batch[i]['scan_id'])
-        out['instance_id'].append(batch[i]['instance_id'])
-        out['split_id'].append(batch[i]['split_id'])
-
-        if batch[i]['manipulate']['type'] == 'addition':
-            out['missing_nodes'].append(global_node_id + batch[i]['manipulate']['added'])
-            out['missing_nodes_decoder'].append(global_dec_id + batch[i]['manipulate']['added'])
-        elif batch[i]['manipulate']['type'] == 'relationship':
-            rel, (sub, obj) = batch[i]['manipulate']['relship']
-            out['manipulated_nodes'].append(global_dec_id + sub)
-            out['manipulated_nodes'].append(global_dec_id + obj)
-
-        if 'scene' in batch[i]:
-            out['scene_points'].append(batch[i]['scene'])
-
-        global_node_id += len(batch[i]['encoder']['objs'])
-        global_dec_id += len(batch[i]['decoder']['objs'])
-
-    for key in ['encoder', 'decoder']:
-        all_objs, all_boxes, all_triples = [], [], []
-        all_obj_to_scene, all_triple_to_scene = [], []
-        all_points = []
-        all_feats = []
-        all_text_feats = []
-        all_rel_feats = []
-
-        obj_offset = 0
+        out['missing_nodes'] = []
+        out['missing_nodes_decoder'] = []
+        out['manipulated_nodes'] = []
+        global_node_id = 0
+        global_dec_id = 0
 
         for i in range(len(batch)):
             if batch[i] == -1:
-                print('this should not happen')
-                continue
-            (objs, triples, boxes) = batch[i][key]['objs'], batch[i][key]['triples'], batch[i][key]['boxes']
+                return -1
+            # notice only works with single batches
+            out['scan_id'].append(batch[i]['scan_id'])
+            out['instance_id'].append(batch[i]['instance_id'])
+            out['split_id'].append(batch[i]['split_id'])
 
-            if 'points' in batch[i][key]:
-                all_points.append(batch[i][key]['points'])
-            if 'feats' in batch[i][key]:
-                all_feats.append(batch[i][key]['feats'])
-            if 'text_feats' in batch[i][key]:
-                all_text_feats.append(batch[i][key]['text_feats'])
-            if 'rel_feats' in batch[i][key]:
-                all_rel_feats.append(batch[i][key]['rel_feats'])
+            if batch[i]['manipulate']['type'] == 'addition':
+                out['missing_nodes'].append(global_node_id + batch[i]['manipulate']['added'])
+                out['missing_nodes_decoder'].append(global_dec_id + batch[i]['manipulate']['added'])
+            elif batch[i]['manipulate']['type'] == 'relationship':
+                rel, (sub, obj) = batch[i]['manipulate']['relship']
+                out['manipulated_nodes'].append(global_dec_id + sub)
+                out['manipulated_nodes'].append(global_dec_id + obj)
 
-            num_objs, num_triples = objs.size(0), triples.size(0)
+            if 'scene' in batch[i]:
+                out['scene_points'].append(batch[i]['scene'])
 
-            all_objs.append(objs)
-            all_boxes.append(boxes)
+            global_node_id += len(batch[i]['encoder']['objs'])
+            global_dec_id += len(batch[i]['decoder']['objs'])
 
-            if triples.dim() > 1:
-                triples = triples.clone()
-                triples[:, 0] += obj_offset
-                triples[:, 2] += obj_offset
+        for key in ['encoder', 'decoder']:
+            all_objs, all_boxes, all_triples = [], [], []
+            all_obj_to_scene, all_triple_to_scene = [], []
+            all_points = []
+            all_feats = []
+            all_text_feats = []
+            all_rel_feats = []
 
-                all_triples.append(triples)
-                all_triple_to_scene.append(torch.LongTensor(num_triples).fill_(i))
+            obj_offset = 0
 
-            all_obj_to_scene.append(torch.LongTensor(num_objs).fill_(i))
+            for i in range(len(batch)):
+                if batch[i] == -1:
+                    print('this should not happen')
+                    continue
+                (objs, triples, boxes) = batch[i][key]['objs'], batch[i][key]['triples'], batch[i][key]['boxes']
 
-            obj_offset += num_objs
+                if 'points' in batch[i][key]:
+                    all_points.append(batch[i][key]['points'])
+                if 'feats' in batch[i][key]:
+                    all_feats.append(batch[i][key]['feats'])
+                if 'text_feats' in batch[i][key]:
+                    all_text_feats.append(batch[i][key]['text_feats'])
+                if 'rel_feats' in batch[i][key]:
+                    all_rel_feats.append(batch[i][key]['rel_feats'])
 
-        all_objs = torch.cat(all_objs)
-        all_boxes = torch.cat(all_boxes)
+                num_objs, num_triples = objs.size(0), triples.size(0)
 
-        all_obj_to_scene = torch.cat(all_obj_to_scene)
+                all_objs.append(objs)
+                all_boxes.append(boxes)
 
-        if len(all_triples) > 0:
-            all_triples = torch.cat(all_triples)
-            all_triple_to_scene = torch.cat(all_triple_to_scene)
-        else:
-            return -1
+                if triples.dim() > 1:
+                    triples = triples.clone()
+                    triples[:, 0] += obj_offset
+                    triples[:, 2] += obj_offset
 
-        outputs = {'objs': all_objs,
-                   'tripltes': all_triples,
-                   'boxes': all_boxes,
-                   'obj_to_scene': all_obj_to_scene,
-                   'triple_to_scene': all_triple_to_scene}
+                    all_triples.append(triples)
+                    all_triple_to_scene.append(torch.LongTensor(num_triples).fill_(i))
 
-        if len(all_points) > 0:
-            all_points = torch.cat(all_points)
-            outputs['points'] = all_points
+                all_obj_to_scene.append(torch.LongTensor(num_objs).fill_(i))
 
-        if len(all_feats) > 0:
-            all_feats = torch.cat(all_feats)
-            outputs['feats'] = all_feats
-        if len(all_text_feats) > 0:
-            all_text_feats = torch.cat(all_text_feats)
-            outputs['text_feats'] = all_text_feats
-        if len(all_rel_feats) > 0:
-            all_rel_feats = torch.cat(all_rel_feats)
-            outputs['rel_feats'] = all_rel_feats
-        out[key] = outputs
+                obj_offset += num_objs
 
-    return out
+            all_objs = torch.cat(all_objs)
+            all_boxes = torch.cat(all_boxes)
 
+            all_obj_to_scene = torch.cat(all_obj_to_scene)
 
-def collate_fn_vaegan_points(batch):
-    """ Wrapper of the function collate_fn_vaegan to make it also return points
-    """
-    return collate_fn_vaegan(batch, use_points=True)
+            if len(all_triples) > 0:
+                all_triples = torch.cat(all_triples)
+                all_triple_to_scene = torch.cat(all_triple_to_scene)
+            else:
+                return -1
+
+            outputs = {'objs': all_objs,
+                    'tripltes': all_triples,
+                    'boxes': all_boxes,
+                    'obj_to_scene': all_obj_to_scene,
+                    'triple_to_scene': all_triple_to_scene}
+
+            if len(all_points) > 0:
+                all_points = torch.cat(all_points)
+                outputs['points'] = all_points
+
+            if len(all_feats) > 0:
+                all_feats = torch.cat(all_feats)
+                outputs['feats'] = all_feats
+            if len(all_text_feats) > 0:
+                all_text_feats = torch.cat(all_text_feats)
+                outputs['text_feats'] = all_text_feats
+            if len(all_rel_feats) > 0:
+                all_rel_feats = torch.cat(all_rel_feats)
+                outputs['rel_feats'] = all_rel_feats
+            out[key] = outputs
+
+        return out
+
+    def collate_fn_vaegan_points(self, batch):
+        """ Wrapper of the function collate_fn_vaegan to make it also return points
+        """
+        return self.collate_fn_vaegan(batch, use_points=True)
 
 if __name__ == "__main__":
     # from model.atlasnet import AE_AtlasNet
@@ -1138,7 +1139,7 @@ if __name__ == "__main__":
         use_points=False,
         use_scene_rels=True,
         eval=False,
-        with_changes=True,
+        with_changes=False,
         vae_baseline=False,
         with_feats=True,
         with_BERT=False,
@@ -1152,5 +1153,12 @@ if __name__ == "__main__":
         crop_floor=False,
         center_scene_to_floor=False,
         recompute_feats=False)
+    
+    print("데이터셋 초기화 완료!")
+    print(f"데이터셋 크기: {len(dataset)}")
+    # print("스캔 ID 목록:")
+    # for i, scan_id in enumerate(dataset.scans):
+    #     print(f"{i}: {scan_id}")
+    
     a = dataset[10]
     print(a)

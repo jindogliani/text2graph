@@ -28,7 +28,7 @@ class VAE(nn.Module):
         self.vocab = vocab
         self.with_angles = with_angles
         self.epoch = 0
-        self.v1full_database = os.path.join(root, "DEEPSDF_reconstruction")
+        self.v1full_database = os.path.join("/mnt/dataset/FRONT", "DEEPSDF_reconstruction")
 
         if self.type_ == 'v1_box':
             assert replace_latent is not None

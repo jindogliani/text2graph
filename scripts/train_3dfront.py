@@ -36,7 +36,7 @@ parser.add_argument('--nepoch', type=int, default=200, help='number of epochs to
 # paths and filenames
 parser.add_argument('--outf', type=str, default='checkpoint', help='output folder')
 parser.add_argument('--model', type=str, default='', help='model path')
-parser.add_argument('--dataset', required=False, type=str, default="/home/commonscenes/FRONT/",
+parser.add_argument('--dataset', required=False, type=str, default="/mnt/dataset/FRONT",
                     help="dataset path")
 parser.add_argument('--logf', default='logs', help='folder to save tensorboard logs')
 parser.add_argument('--exp', default='../experiments/layout_test', help='experiment name') #학습된 모델이 저장되는 경로
