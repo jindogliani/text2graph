@@ -1,0 +1,15 @@
+left
+right
+front
+behind
+close by
+above
+standing on
+bigger than
+smaller than
+taller than
+shorter than
+symmetrical to
+same style as
+same super category as
+same material as
