@@ -1,0 +1,14 @@
+place night_stand near by sofa(real).
+I want 4 chairs around dining_table(real), 2 in front and 2 behind.
+place double_bed left to desk(real)
+
+desk(real) left double_bed
+desk(real) close by night_stand
+dining_table(real) front chair
+dining_table(real) front chair
+dining_table(real) behind chair
+dining_table(real) behind chair
+
+앞에가 subject(주체)
+가운데 relation(관계)
+뒤에가 object(객체) 

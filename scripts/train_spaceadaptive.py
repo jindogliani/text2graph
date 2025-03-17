@@ -5,6 +5,7 @@ import os
 import sys
 import json
 import time
+import glob
 import random
 import argparse
 import numpy as np
@@ -18,6 +19,7 @@ from torch.utils.tensorboard import SummaryWriter
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from model.VAE_spaceadaptive import VAE
+from spaceadaptive.SpaceAdaptiveVAE import SpaceAdaptiveVAE
 from model.discriminator import BoxDiscriminator, ShapeAuxillary
 from dataset.threedfront_dataset import ThreedFrontDatasetSceneGraph
 from helpers.metrics import calculate_model_losses
@@ -53,13 +55,21 @@ parser.add_argument('--network_type', default='v2_full', choices=['v2_box', 'v2_
 parser.add_argument('--diff_yaml', default='../config/v2_full.yaml', type=str, help='diffusion 네트워크 설정 [cross_attn/concat]')
 parser.add_argument('--vis_num', type=int, default=8, help='학습 중 시각화 수')
 
+# SpaceAdaptive 모델 특화 인자
 # 현실 공간 데이터 관련 인자 추가
-parser.add_argument('--real_space_data', default='../spacedata/real_space_sample.json', type=str, help='현실 공간 데이터 경로')
+parser.add_argument('--space_data_path', default='../spaceadaptive/spacedata/spacedata.json', type=str, help='현실 공간 데이터 경로')
 parser.add_argument('--use_real_space', default=True, type=bool_flag, help='현실 공간 데이터 사용 여부')
+parser.add_argument('--real_space_id', default='Lounge', type=str, help='특정 현실 공간 ID (None이면 랜덤 선택)')
+
 parser.add_argument('--real_space_weight', default=0.3, type=float, help='현실 공간 임베딩 가중치 (0~1)')
 parser.add_argument('--real_space_loss_weight', default=0.5, type=float, help='현실 공간 손실 가중치')
 parser.add_argument('--real_space_condition_freq', default=0.7, type=float, help='현실 공간 조건화 빈도 (0~1)')
-parser.add_argument('--real_space_id', default=None, type=str, help='특정 현실 공간 ID (None이면 랜덤 선택)')
+
+# SpaceAdaptiveVAE 관련 추가 인자
+parser.add_argument('--use_space_adaptive', default=False, type=bool_flag, help='SpaceAdaptiveVAE 사용 여부')
+parser.add_argument('--virtual_scenes_dir', default='../datasample/SG-FRONT', type=str, help='가상 씬 데이터셋 경로')
+parser.add_argument('--hybrid_scene_output', default='../spaceadaptive/hybrid_scene.json', type=str, help='생성된 하이브리드 씬 저장 경로')
+parser.add_argument('--top_k_scenes', default=20, type=int, help='선택할 상위 유사 씬 개수')
 
 args = parser.parse_args()
 print(args)
@@ -191,15 +201,22 @@ def train():
     if args.loadmodel:
         model.load_networks(exp=args.exp, epoch=args.loadepoch, restart_optim=False)
 
+    # SpaceAdaptive 현실 공간 로드 및 임베딩
+    # SpaceAdaptiveVAE 초기화
+    space_adaptive_vae = SpaceAdaptiveVAE(model)
+    
     # 현실 공간 데이터 로드 및 임베딩
     real_space_embeddings = None
-    if args.use_real_space and args.real_space_data is not None:
+    if args.use_real_space and args.space_data_path is not None:
         print("현실 공간 데이터 로드 중...")
-        real_space_data = model.load_real_space_data(args.real_space_data)
+        real_space_data = space_adaptive_vae.load_real_space_data(args.space_data_path)
         if real_space_data:
             print("현실 공간 데이터 임베딩 생성 중...")
-            real_space_embeddings = model.encode_real_space()
+            real_space_embeddings = space_adaptive_vae.encode_real_space()
             print(f"현실 공간 임베딩 생성 완료: {len(real_space_embeddings) if real_space_embeddings else 0}개 공간")
+            
+            # CUDA 설정
+            space_adaptive_vae.set_cuda()
 
     # 판별자 모델 설정
     if args.weight_D_box > 0:
@@ -255,20 +272,21 @@ def train():
                 print("데이터 오류 발생:", e)
                 continue
 
+            # SpaceAdaptive 현실 공간 조건화 처리
             # 현실 공간 임베딩 랜덤 선택 (조건화에 사용)
             real_space_id = None
             real_space_embedding = None
             
             # 현실 공간 조건화 여부 결정 (확률 기반)
-            use_real_space_this_batch = args.use_real_space and real_space_embeddings and random.random() < args.real_space_condition_freq
+            use_real_space_this_batch = args.use_real_space and space_adaptive_vae.real_space_embedding and random.random() < args.real_space_condition_freq
             
             if use_real_space_this_batch:
-                if args.real_space_id and args.real_space_id in real_space_embeddings:
+                if args.real_space_id and args.real_space_id in space_adaptive_vae.real_space_embedding:
                     real_space_id = args.real_space_id
                 else:
                     # 랜덤하게 현실 공간 ID 선택
-                    real_space_id = random.choice(list(real_space_embeddings.keys()))
-                real_space_embedding = real_space_embeddings[real_space_id]
+                    real_space_id = random.choice(list(space_adaptive_vae.real_space_embedding.keys()))
+                real_space_embedding = space_adaptive_vae.real_space_embedding[real_space_id]
 
             # 네트워크 순전파
             if real_space_embedding is not None:
@@ -361,11 +379,62 @@ def train():
 
             counter += 1
 
-        # 각 에폭마다 모델 저장
-        model.epoch = epoch
-        if epoch % 5 == 0:
-            model.save(args.exp, os.path.join(args.outf, "model_epoch"), epoch, counter)
-            print('Saved model at epoch {}'.format(epoch))
+        # 에폭 완료 후 모델 저장
+        if epoch % args.snapshot == 0:
+            model.save(args.exp, args.outf, epoch, counter)
+        
+        # 학습 종료 후 SpaceAdaptiveVAE 처리
+        if args.use_space_adaptive and args.use_real_space and args.space_data_path and epoch % args.snapshot == 0:
+            print("SpaceAdaptiveVAE 처리 시작...")
+            
+            # 1. 가상 씬 데이터셋 로드
+            print(f"가상 씬 데이터셋 로드 중 ({args.virtual_scenes_dir})...")
+            virtual_scenes = {}
+            scene_files = glob.glob(os.path.join(args.virtual_scenes_dir, "*.json"))
+            for scene_file in scene_files:
+                scene_id = os.path.basename(scene_file).split('.')[0]
+                with open(scene_file, 'r') as f:
+                    virtual_scenes[scene_id] = json.load(f)
+            print(f"{len(virtual_scenes)}개의 가상 씬 데이터 로드 완료")
+            
+            # 3. 현실 공간 데이터 로드 (아직 로드하지 않은 경우)
+            if space_adaptive_vae.real_space_data is None:
+                space_adaptive_vae.load_real_space_data(args.space_data_path)
+            
+            # 4. 현실 공간 임베딩 생성
+            print("현실 공간 임베딩 생성 중...")
+            real_space_embedding = space_adaptive_vae.train_with_real_space(args.space_data_path, dataloader)
+            
+            # 5. 유사 가상 씬 식별
+            print("현실 공간과 유사한 가상 씬 식별 중...")
+            similar_scenes = space_adaptive_vae.identify_similar_virtual_scenes(virtual_scenes, top_k=args.top_k_scenes)
+            print(f"현실 공간과 가장 유사한 {len(similar_scenes)}개 가상 씬 식별 완료")
+            
+            # 6. 하이브리드 씬 생성
+            print("하이브리드 씬 생성 중...")
+            hybrid_scene = space_adaptive_vae.generate_hybrid_scene_from_similar()
+            print("하이브리드 씬 생성 완료")
+            
+            # 7. 생성된 하이브리드 씬 저장
+            hybrid_scene_path = os.path.join(args.exp, f'hybrid_scene_epoch_{epoch}.json')
+            space_adaptive_vae.save_hybrid_scene(hybrid_scene_path)
+            print(f"하이브리드 씬 저장 완료: {hybrid_scene_path}")
+            
+            # 8. 최신 하이브리드 씬 심볼릭 링크 생성
+            latest_hybrid_scene_path = args.hybrid_scene_output
+            os.makedirs(os.path.dirname(latest_hybrid_scene_path), exist_ok=True)
+            if os.path.exists(latest_hybrid_scene_path):
+                os.remove(latest_hybrid_scene_path)
+            try:
+                os.symlink(hybrid_scene_path, latest_hybrid_scene_path)
+                print(f"최신 하이브리드 씬 링크 생성: {latest_hybrid_scene_path}")
+            except:
+                # 심볼릭 링크 생성 실패 시 복사
+                import shutil
+                shutil.copy2(hybrid_scene_path, latest_hybrid_scene_path)
+                print(f"최신 하이브리드 씬 복사: {latest_hybrid_scene_path}")
+
+    print('Training completed!')
 
 if __name__ == '__main__':
     train() 

@@ -16,7 +16,6 @@ from model.VAEGAN_V1FULL import Sg2ScVAEModel as v1_full
 from model.VAEGAN_V2BOX import Sg2ScVAEModel as v2_box
 from model.VAEGAN_V2FULL import Sg2ScVAEModel as v2_full
 
-
 class VAE(nn.Module):
     # diff_opt는 "diffusion options"의 약자
     def __init__(self, root="../GT",type='v1_box', diff_opt = '../config/v2_full.yaml', vocab=None, replace_latent=False, with_changes=True, distribution_before=True,
@@ -33,11 +32,12 @@ class VAE(nn.Module):
         self.epoch = 0
         self.v1full_database = os.path.join(root, "DEEPSDF_reconstruction")
         
+        # SpaceAdaptive Model
         # 현실 공간 관련 파라미터 추가
-        self.use_real_space = use_real_space
+        self.use_real_space = use_real_space # Lounge, Studio 씬그래프 정보 모두 포함.
         self.real_space_weight = real_space_weight
         self.real_space_embeddings = None
-        self.real_space_data = None
+        self.space_data = None
 
         if self.type_ == 'v1_box':
             assert replace_latent is not None
@@ -77,114 +77,60 @@ class VAE(nn.Module):
         self.counter = 0
 
     def set_cuda(self):
-        self.vae_v2.set_cuda()
-        if self.real_space_embeddings is not None:
+        """
+        모델과 임베딩을 CUDA 장치로 이동시키는 메서드
+        """
+        if self.type_ == 'v2_full':
+            self.vae_v2.set_cuda()
+        elif self.type_ == 'v1_full':
+            if hasattr(self, 'vae') and self.vae is not None:
+                self.vae.set_cuda()
+        elif self.type_ == 'v1_box' or self.type_ == 'v2_box':
+            if hasattr(self, 'vae_box') and self.vae_box is not None:
+                self.vae_box.set_cuda()
+        
+        # 현실 공간 임베딩이 있다면 CUDA로 이동
+        if hasattr(self, 'real_space_embeddings') and self.real_space_embeddings is not None:
             self.real_space_embeddings = {k: v.cuda() for k, v in self.real_space_embeddings.items()}
 
-    # 현실 공간 데이터 로드 및 처리
-    def load_real_space_data(self, real_space_data_path):
+
+    # SpaceAdaptive: 텐서 데이터 인코딩
+    def encode_real_space_tensors(self, objs_tensor, boxes_tensor, triples_tensor):
         """
-        현실 공간 데이터를 로드하고 처리하는 메서드
+        이미 처리된 텐서 데이터를 인코딩하여 임베딩 벡터 생성
         
         Args:
-            real_space_data_path (str): 현실 공간 데이터 파일 경로
+            objs_tensor (torch.Tensor): 객체 클래스 텐서
+            boxes_tensor (torch.Tensor): 바운딩 박스 텐서
+            triples_tensor (torch.Tensor): 관계 텐서
             
         Returns:
-            dict: 처리된 현실 공간 데이터
+            torch.Tensor: 인코딩된 임베딩 벡터
         """
-        with open(real_space_data_path, 'r') as f:
-            real_space_data = json.load(f)
+        # 텐서를 GPU로 이동
+        objs_tensor = objs_tensor.cuda()
+        boxes_tensor = boxes_tensor.cuda()
+        triples_tensor = triples_tensor.cuda()
         
-        self.real_space_data = real_space_data
-        print(f"현실 공간 데이터 로드 완료: {len(real_space_data)} 공간")
-        return real_space_data
-    
-    def encode_real_space(self, real_space_id=None):
-        """
-        현실 공간 데이터를 인코딩하여 임베딩 벡터를 생성하는 메서드
-        
-        Args:
-            real_space_id (str, optional): 인코딩할 특정 현실 공간 ID. None이면 모든 공간 인코딩
-            
-        Returns:
-            dict: 현실 공간 ID를 키로, 임베딩 벡터를 값으로 하는 딕셔너리
-        """
-        if self.real_space_data is None:
-            print("현실 공간 데이터가 로드되지 않았습니다. load_real_space_data()를 먼저 호출하세요.")
-            return None
-        
-        # 인코딩할 공간 ID 목록 결정
-        space_ids = [real_space_id] if real_space_id else list(self.real_space_data.keys())
-        embeddings = {}
-        
-        for space_id in space_ids:
-            if space_id not in self.real_space_data:
-                print(f"경고: {space_id} ID를 가진 현실 공간이 데이터에 없습니다.")
-                continue
-            
-            space_data = self.real_space_data[space_id]
-            
-            # 객체 클래스, 바운딩 박스, 관계 추출
-            objs = []
-            boxes = []
-            triples = []
-            
-            # 객체 정보 처리
-            for obj_id, obj_info in enumerate(space_data["objects"]):
-                obj_class = obj_info["class"]
-                if obj_class in self.vocab["object_name_to_idx"]:
-                    class_idx = self.vocab["object_name_to_idx"][obj_class]
-                    objs.append(class_idx)
-                    
-                    # 바운딩 박스 정보 처리
-                    box = obj_info["bbox"]
-                    if self.with_angles:
-                        angle = obj_info.get("angle", 0)
-                        box.append(angle)
-                    boxes.append(box)
-                else:
-                    print(f"경고: {obj_class} 클래스가 어휘에 없습니다.")
-            
-            # 관계 정보 처리
-            for rel in space_data["relationships"]:
-                subj_idx = rel["subject"]
-                obj_idx = rel["object"]
-                rel_type = rel["relation"]
-                
-                if rel_type in self.vocab["pred_name_to_idx"]:
-                    rel_idx = self.vocab["pred_name_to_idx"][rel_type]
-                    triples.append([subj_idx, rel_idx, obj_idx])
-                else:
-                    print(f"경고: {rel_type} 관계가 어휘에 없습니다.")
-            
-            # 텐서 변환
-            objs_tensor = torch.tensor(objs, dtype=torch.long)
-            boxes_tensor = torch.tensor(boxes, dtype=torch.float)
-            triples_tensor = torch.tensor(triples, dtype=torch.long)
-            
-            # 현실 공간 인코딩
-            if self.type_ == 'v1_box' or self.type_ == 'v2_box':
-                mu, logvar = self.vae_box.encoder(objs_tensor.cuda(), triples_tensor.cuda(), boxes_tensor.cuda(), None)
-                embedding = mu  # 평균 벡터만 사용
-            elif self.type_ == 'v1_full':
-                mu, logvar = self.vae.encoder(objs_tensor.cuda(), triples_tensor.cuda(), boxes_tensor.cuda(), None)
-                embedding = mu
-            elif self.type_ == 'v2_full':
-                # CLIP 특성이 필요한 경우 더미 데이터 생성
-                if self.vae_v2.clip:
-                    dummy_text_feats = torch.zeros((len(objs), 512)).cuda()
-                    dummy_rel_feats = torch.zeros((len(triples), 512)).cuda()
-                    mu, logvar = self.vae_v2.encoder(objs_tensor.cuda(), triples_tensor.cuda(), boxes_tensor.cuda(), 
-                                                    None, dummy_text_feats, dummy_rel_feats)
-                else:
-                    mu, logvar = self.vae_v2.encoder(objs_tensor.cuda(), triples_tensor.cuda(), boxes_tensor.cuda(), None)
-                embedding = mu
-            
-            embeddings[space_id] = embedding
-        
-        self.real_space_embeddings = embeddings
-        return embeddings
-    
+        # 모델 타입에 따른 인코딩
+        if self.type_ == 'v1_box' or self.type_ == 'v2_box':
+            mu, logvar = self.vae_box.encoder(objs_tensor, triples_tensor, boxes_tensor, None)
+            embedding = mu  # 평균 벡터만 사용
+        elif self.type_ == 'v1_full':
+            mu, logvar = self.vae.encoder(objs_tensor, triples_tensor, boxes_tensor, None)
+            embedding = mu
+        elif self.type_ == 'v2_full':
+            # CLIP 특성이 필요한 경우 더미 데이터 생성
+            if self.vae_v2.clip:
+                dummy_text_feats = torch.zeros((len(objs_tensor), 512)).cuda()
+                dummy_rel_feats = torch.zeros((len(triples_tensor), 512)).cuda()
+                mu, logvar = self.vae_v2.encoder(objs_tensor, triples_tensor, boxes_tensor, 
+                                              None, dummy_text_feats, dummy_rel_feats)
+            else:
+                mu, logvar = self.vae_v2.encoder(objs_tensor, triples_tensor, boxes_tensor, None)
+            embedding = mu
+        return embedding
+
     def condition_with_real_space(self, real_space_embedding, z, alpha=None):
         """
         가상 공간 생성 시 현실 공간 임베딩으로 조건화하는 메서드
@@ -574,6 +520,87 @@ class VAE(nn.Module):
         if self.type_ == 'v1_full':
             return self.vae.sample(self.mean_est, self.cov_est, dec_objs, dec_triplets, attributes)[1]
 
+    def sample_box_from_latent(self, z, dec_objs, dec_triplets, encoded_dec_text_feat, encoded_dec_rel_feat, attributes=None):
+        """
+        주어진 잠재 벡터에서 박스 샘플링
+        
+        Args:
+            z: 잠재 벡터
+            dec_objs, dec_triplets, ...: 디코딩 파라미터
+            
+        Returns:
+            boxes: 생성된 바운딩 박스
+        """
+        if self.type_ == 'v1_box' or self.type_ == 'v2_box':
+            return self.vae_box.decoder(z, dec_objs, dec_triplets, attributes, encoded_dec_text_feat, encoded_dec_rel_feat)[0]
+        elif self.type_ == 'v1_full':
+            return self.vae.decoder(z, dec_objs, dec_triplets, attributes)[0]
+        elif self.type_ == 'v2_full':
+            return self.vae_v2.decoder(z, dec_objs, dec_triplets, attributes, encoded_dec_text_feat, encoded_dec_rel_feat)[0]
+    
+    # SpaceAdaptive Model
+    def decoder_with_changes_boxes_and_shape_real(self, real_space_embedding, objs, triples, encoded_dec_text_feat, encoded_dec_rel_feat, dec_sdfs, attributes, missing_nodes, manipulated_nodes, gen_shape=False, real_space_weight=0.3):
+        """
+        현실 공간 임베딩을 활용한 디코딩
+        
+        Args:
+            real_space_embedding: 현실 공간 임베딩
+            objs, triples, ...: 일반적인 디코딩 파라미터들
+            real_space_weight: 현실 공간 임베딩 가중치
+            
+        Returns:
+            boxes, shapes: 생성된 바운딩 박스와 형상
+        """
+        # 현실 공간 임베딩과 랜덤 잠재 벡터 생성
+        batch_size = 1  # 기본값
+        z_dim = real_space_embedding.shape[-1]
+        z_random = torch.randn(batch_size, z_dim).cuda()
+        
+        # 현실 공간 임베딩과 랜덤 벡터 결합
+        z_hybrid = self.condition_with_real_space(real_space_embedding, z_random, alpha=real_space_weight)
+        
+        # 결합된 잠재 벡터로 디코딩
+        if self.type_ == 'v2_full':
+            boxes, shapes, _ = self.vae_v2.decoder_with_changes(z_hybrid, objs, triples, encoded_dec_text_feat, encoded_dec_rel_feat, dec_sdfs, attributes, missing_nodes, manipulated_nodes, gen_shape=gen_shape)
+            return boxes, shapes
+        else:
+            # 다른 모델 타입에 대한 처리
+            boxes, shapes, _ = self.decoder_with_changes_boxes_and_shape(z_hybrid, None, objs, triples, encoded_dec_text_feat, encoded_dec_rel_feat, dec_sdfs, attributes, missing_nodes, manipulated_nodes, gen_shape=gen_shape)
+            return boxes, shapes
+
+    # SpaceAdaptive Model
+    def sample_box_and_shape_real(self, point_classes_idx, dec_objs, dec_triples, dec_sdfs, encoded_dec_text_feat, encoded_dec_rel_feat, dec_attributes, gen_shape=False, real_space_embedding=None, real_space_weight=0.3):
+        """
+        현실 공간 임베딩을 활용한 샘플링
+        
+        Args:
+            point_classes_idx, dec_objs, ...: 일반적인 샘플링 파라미터들
+            real_space_embedding: 현실 공간 임베딩
+            real_space_weight: 현실 공간 임베딩 가중치
+            
+        Returns:
+            boxes, shapes: 생성된 바운딩 박스와 형상
+        """
+        if real_space_embedding is None:
+            # 일반적인 샘플링
+            return self.sample_box_and_shape(point_classes_idx, dec_objs, dec_triples, dec_sdfs, encoded_dec_text_feat, encoded_dec_rel_feat, dec_attributes, gen_shape)
+        
+        # 현실 공간 임베딩과 랜덤 잠재 벡터 결합
+        batch_size = 1  # 기본값
+        z_dim = real_space_embedding.shape[-1]
+        z_random = torch.randn(batch_size, z_dim).cuda()
+        z_hybrid = self.condition_with_real_space(real_space_embedding, z_random, alpha=real_space_weight)
+        
+        # 결합된 잠재 벡터로 샘플링
+        if self.type_ == 'v2_full':
+            return self.vae_v2.sample_from_latent(point_classes_idx, z_hybrid, dec_objs, dec_triples, dec_sdfs, encoded_dec_text_feat, encoded_dec_rel_feat, dec_attributes, gen_shape=gen_shape)
+        elif self.type_ == 'v1_full':
+            return self.vae.sample_from_latent(point_classes_idx, z_hybrid, dec_objs, dec_triples, dec_attributes)
+        else:
+            # v1_box, v2_box 처리
+            boxes = self.sample_box_from_latent(z_hybrid, dec_objs, dec_triples, encoded_dec_text_feat, encoded_dec_rel_feat, dec_attributes)
+            shapes = None
+            return boxes, shapes
 
     def save(self, exp, outf, epoch, counter=None):
         if self.type_ == 'v1_box' or self.type_ == 'v2_box':

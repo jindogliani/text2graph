@@ -876,19 +876,27 @@ if __name__ == "__main__":
         room_type='all',
         recompute_clip=False)
     a = dataset[0]
+    print("=======dataset[0]=======")
     print(a)
+    print()
+    print("=======dataset[0]안의 key값들=======")
+    print(a.keys())
+    print("=======dataset[0]['encoder']안의 key값들=======")
+    print(a['encoder'].keys())
+    print("=======dataset[0]['decoder']안의 key값들=======")
+    print(a['decoder'].keys())
+    print()
     
-    # print("Scan ID:", a['scan_id'])
-    # print("객체 개수:", len(a['encoder']['objs']))
-    # print("관계 개수:", len(a['encoder']['triples']))
-    # print("객체 ID 목록:", a['encoder']['objs']) #classes_bedroom.txt에서 객체 ID값을 갖고옴.
-    # # print("관계 리스트:", a['encoder']['triples'])
-    # print("바운딩 박스:", a['encoder']['boxes'].shape)
-    
-    # if 'text_feats' in a['encoder']:
-    #     print("CLIP 객체 특징 벡터 크기:", a['encoder']['text_feats'].shape)
-    # if 'rel_feats' in a['encoder']:
-    #     print("CLIP 관계 특징 벡터 크기:", a['encoder']['rel_feats'].shape)
+    print("Scan ID:", a['scan_id'])
+    print("객체 개수:", len(a['encoder']['objs']))
+    print("관계 개수:", len(a['encoder']['triples']))
+    print("객체 ID 목록:", a['encoder']['objs']) #classes_bedroom.txt에서 객체 ID값을 갖고옴.
+    print("관계 리스트:", a['encoder']['triples'])
+    print("바운딩 박스:", a['encoder']['boxes'].shape)
+    if 'text_feats' in a['encoder']:
+        print("CLIP 객체 특징 벡터 크기:", a['encoder']['text_feats'].shape)
+    if 'rel_feats' in a['encoder']:
+        print("CLIP 관계 특징 벡터 크기:", a['encoder']['rel_feats'].shape)
 
     for x in ['encoder', 'decoder']:
         en_obj = a[x]['objs'].cpu().numpy().astype(np.int32)

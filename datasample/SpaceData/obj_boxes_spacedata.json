@@ -1,7 +1,7 @@
 {
   "Lounge": {
     "1": {
-      "object": "15_dining_table: 1",
+      "object": "dining_table",
       "param7": [
         1.0,
         1.19910264,
@@ -61,7 +61,7 @@
       "model_path": null
     },
     "2": {
-      "object": "3_bookshelf: 2",
+      "object": "bookshelf",
       "param7": [
         0.5291753,
         2.22839856,
@@ -121,7 +121,7 @@
       "model_path": null
     },
     "3": {
-      "object": "32_table: 3",
+      "object": "table",
       "param7": [
         2.44113064,
         0.885994,
@@ -181,7 +181,7 @@
       "model_path": null
     },
     "4": {
-      "object": "3_bookshelf: 4",
+      "object": "bookshelf",
       "param7": [
         0.460713118,
         1.76004386,
@@ -241,7 +241,7 @@
       "model_path": null
     },
     "5": {
-      "object": "6_chair: 5",
+      "object": "chair",
       "param7": [
         0.9463484,
         1.23302448,
@@ -301,7 +301,7 @@
       "model_path": null
     },
     "6": {
-      "object": "13_desk: 6",
+      "object": "desk",
       "param7": [
         0.9506683,
         0.8937819,
@@ -361,7 +361,7 @@
       "model_path": null
     },
     "7": {
-      "object": "30_sofa: 7",
+      "object": "sofa",
       "param7": [
         1.0,
         0.8720015,
@@ -421,7 +421,7 @@
       "model_path": null
     },
     "8": {
-      "object": "4_cabinet: 8",
+      "object": "cabinet",
       "param7": [
         0.6373377,
         1.99792528,
@@ -481,7 +481,7 @@
       "model_path": null
     },
     "9": {
-      "object": "4_cabinet: 9",
+      "object": "cabinet",
       "param7": [
         0.46416375,
         2.3129375,
@@ -541,7 +541,7 @@
       "model_path": null
     },
     "10": {
-      "object": "36_floor: 10",
+      "object": "floor",
       "param7": [
         7.2599864,
         2.220446E-16,

@@ -18,6 +18,7 @@ from torch.utils.tensorboard import SummaryWriter
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from model.VAE_spaceadaptive import VAE
+from spaceadaptive.SpaceAdaptiveVAE import SpaceAdaptiveVAE
 from dataset.threedfront_dataset import ThreedFrontDatasetSceneGraph
 from helpers.util import bool_flag
 
@@ -34,13 +35,18 @@ parser.add_argument('--gen_shape', default=True, type=bool_flag, help='형상 �
 parser.add_argument('--num_samples', type=int, default=3, help='샘플 수')
 parser.add_argument('--no_stool', default=False, type=bool_flag, help='스툴 제외 여부')
 
-# 현실 공간 데이터 관련 인자 추가
+# SpaceAdaptive: 현실 공간 데이터 관련 인자 추가
 parser.add_argument('--real_space_data', default='../spacedata/real_space_sample.json', type=str, help='현실 공간 데이터 경로')
 parser.add_argument('--use_real_space', default=True, type=bool_flag, help='현실 공간 데이터 사용 여부')
 parser.add_argument('--real_space_weight', default=0.3, type=float, help='현실 공간 임베딩 가중치 (0~1)')
 parser.add_argument('--real_space_id', default=None, type=str, help='현실 공간 ID (None이면 모든 공간 평가)')
 parser.add_argument('--ablation_study', default=False, type=bool_flag, help='가중치 변화에 따른 ablation 연구 수행')
 parser.add_argument('--ablation_weights', default='0.1,0.3,0.5,0.7,0.9', type=str, help='ablation 연구를 위한 가중치 목록')
+
+# SpaceAdaptiveVAE 관련 인자 추가
+parser.add_argument('--use_hybrid_scene', default=False, type=bool_flag, help='하이브리드 씬 사용 여부')
+parser.add_argument('--hybrid_scene_path', default='../spaceadaptive/hybrid_scene.json', type=str, help='하이브리드 씬 파일 경로')
+parser.add_argument('--generate_from_hybrid', default=False, type=bool_flag, help='하이브리드 씬에서 샘플 생성 여부')
 
 args = parser.parse_args()
 print(args)
@@ -190,14 +196,21 @@ def evaluate():
 
     cat2objs = None
 
+    # SpaceAdaptiveVAE 초기화
+    space_adaptive_vae = SpaceAdaptiveVAE(model)
+    
     # 현실 공간 데이터 로드 및 임베딩
     real_space_embeddings = None
     if args.use_real_space and args.real_space_data is not None:
         print("현실 공간 데이터 로드 중...")
-        real_space_data = model.load_real_space_data(args.real_space_data)
+        real_space_data = space_adaptive_vae.load_real_space_data(args.real_space_data)
         if real_space_data:
             print("현실 공간 데이터 임베딩 생성 중...")
-            real_space_embeddings = model.encode_real_space(args.real_space_id)
+            real_space_embeddings = space_adaptive_vae.encode_real_space(args.real_space_id)
+            
+            # CUDA 설정
+            space_adaptive_vae.set_cuda()
+            
             if args.real_space_id:
                 print(f"현실 공간 '{args.real_space_id}' 임베딩 생성 완료")
             else:
@@ -211,17 +224,17 @@ def evaluate():
             print(f"\n---- 현실 공간 가중치 {weight} 실험 ----")
         
         # 평가 수행
-        if args.use_real_space and real_space_embeddings:
+        if args.use_real_space and space_adaptive_vae.real_space_embedding:
             # 현실 공간 ID 결정
-            space_ids = list(real_space_embeddings.keys())
+            space_ids = list(space_adaptive_vae.real_space_embedding.keys())
             test_space_ids = [args.real_space_id] if args.real_space_id else space_ids
             
             for space_id in test_space_ids:
-                if space_id not in real_space_embeddings:
+                if space_id not in space_adaptive_vae.real_space_embedding:
                     print(f"경고: {space_id} ID를 가진 현실 공간이 데이터에 없습니다.")
                     continue
                 
-                real_space_embedding = real_space_embeddings[space_id]
+                real_space_embedding = space_adaptive_vae.real_space_embedding[space_id]
                 print(f"\n현실 공간 ID: {space_id}, 가중치: {weight}")
                 
                 print('\n편집 모드 - 추가')
@@ -275,6 +288,86 @@ def evaluate():
                                    point_classes_idx=test_dataset_no_changes.point_classes_idx,
                                    export_3d=args.export_3d, cat2objs=cat2objs, 
                                    datasize='large' if modelArgs['large'] else 'small', gen_shape=args.gen_shape)
+
+    # 하이브리드 씬 활용 평가
+    if args.use_hybrid_scene and args.hybrid_scene_path:
+        print(f"하이브리드 씬 활용 평가 시작 ({args.hybrid_scene_path})...")
+        
+        # 1. SpaceAdaptiveVAE 초기화
+        space_adaptive_vae = SpaceAdaptiveVAE(model)
+        
+        # 2. 저장된 하이브리드 씬 로드
+        try:
+            hybrid_scene = space_adaptive_vae.load_hybrid_scene(args.hybrid_scene_path)
+            print(f"하이브리드 씬 로드 완료: {len(hybrid_scene['objects'])}개 객체, {len(hybrid_scene['relationships'])}개 관계")
+        except Exception as e:
+            print(f"하이브리드 씬 로드 오류: {e}")
+            return
+        
+        if args.generate_from_hybrid:
+            # 3. 하이브리드 씬 기반 추론
+            print("하이브리드 씬 기반 샘플 생성 중...")
+            os.makedirs(os.path.join(args.exp, 'hybrid_outputs'), exist_ok=True)
+            
+            for i in range(args.num_samples):
+                print(f"샘플 {i+1}/{args.num_samples} 생성 중...")
+                
+                # 입력 조건 설정 (예시)
+                input_condition = {
+                    "add_object": {"class": "chair", "position": [1.0, 0, 2.0]},
+                    "modify_relation": {"subject": "1", "object": "2", "relation": "front"}
+                }
+                
+                # 샘플 생성
+                generated_scene = space_adaptive_vae.inference_with_hybrid_scene(input_condition)
+                
+                # 생성된 씬 저장
+                output_path = os.path.join(args.exp, 'hybrid_outputs', f'generated_scene_{i}.json')
+                with open(output_path, 'w') as f:
+                    json.dump(generated_scene, f, indent=2)
+                print(f"생성된 씬 저장 완료: {output_path}")
+            
+            print(f"{args.num_samples}개의 샘플 생성 완료")
+            
+            # 4. 생성된 씬들 분석 (선택적)
+            print("생성된 씬 통계 분석 중...")
+            # 객체 유형 분포, 공간 활용 등 분석
+            # TODO: 자세한 분석 로직 구현
+            
+        else:
+            # 하이브리드 씬 자체 분석
+            print("하이브리드 씬 분석 중...")
+            # 객체 유형 및 관계 분석
+            object_classes = {}
+            for obj_id, obj_info in hybrid_scene['objects'].items():
+                obj_class = obj_info['class']
+                if obj_class in object_classes:
+                    object_classes[obj_class] += 1
+                else:
+                    object_classes[obj_class] = 1
+            
+            print("하이브리드 씬 객체 클래스 분포:")
+            for obj_class, count in sorted(object_classes.items(), key=lambda x: x[1], reverse=True):
+                print(f"  - {obj_class}: {count}개")
+            
+            # 관계 분석
+            relation_types = {}
+            for rel in hybrid_scene['relationships']:
+                rel_type = rel['relation']
+                if rel_type in relation_types:
+                    relation_types[rel_type] += 1
+                else:
+                    relation_types[rel_type] = 1
+            
+            print("하이브리드 씬 관계 유형 분포:")
+            for rel_type, count in sorted(relation_types.items(), key=lambda x: x[1], reverse=True):
+                print(f"  - {rel_type}: {count}개")
+            
+            # 공간 분석
+            # 객체 간 거리, 군집 등 분석
+            # TODO: 자세한 분석 로직 구현
+    
+    print('평가 완료')
 
 def validate_constrains_loop_w_changes_real(modelArgs, testdataloader, model, real_space_embedding, normalized_file=None, 
                                            with_diversity=True, with_angles=False, num_samples=3, cat2objs=None, 
