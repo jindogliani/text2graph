@@ -1,9 +1,13 @@
-place night_stand near by sofa(real).
+
+==저작유저(author user)가 씬을 생성할 때 작성한 입력 텍스트==
+place night_stand near by dining_table(real).
 I want 4 chairs around dining_table(real), 2 in front and 2 behind.
 place double_bed left to desk(real)
 
-desk(real) left double_bed
-desk(real) close by night_stand
+==엔드유저가 뱉은 트리플릿==
+desk(real) left double_bed(virtual)
+table(real) close by night_stand
+dining_table(real) left night_stand
 dining_table(real) front chair
 dining_table(real) front chair
 dining_table(real) behind chair
@@ -12,3 +16,8 @@ dining_table(real) behind chair
 앞에가 subject(주체)
 가운데 relation(관계)
 뒤에가 object(객체) 
+
+raw input text vs. triplets
+G-eval => 정량 평가에 있어서 굉장히 많이 쓰이고 있다. 
+BERT-score ICLR 2020
+Rouge, BLEU-score

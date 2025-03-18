@@ -108,6 +108,14 @@ class SpaceAdaptiveVAE:
                 # 바운딩 박스 처리
                 if "bbox" in target_scan and obj_id in target_scan["bbox"]:
                     box = target_scan["bbox"][obj_id]["param7"]
+                    # SG-FRONT 데이터셋도 바운딩박스를 param7으로 하는가? => 그렇다.
+                    # scene center가 다 달라서 바운딩박스의 절대좌표가 다 다를 텐데 이를 어떻게 처리해야 하는가? => 데이터셋 로드할 때 정규화
+                    # => 현실공간 데이터는 이미 scene center가 (0,0,0)이라 정규화 필요 없음.
+                    # 회전 각도 양자화 (24개의 이산 각도 값으로 변환)
+                    bins = np.linspace(np.deg2rad(-180), np.deg2rad(180), 24)
+                    angle_index = np.digitize(box[6], bins)
+                    box[6] = angle_index
+                    
                     boxes.append(box)
                 else:
                     boxes.append([0, 0, 0, 0, 0, 0, 0])
@@ -159,35 +167,40 @@ class SpaceAdaptiveVAE:
         
         return objs_tensor, boxes_tensor, triples_tensor
     
-    def encode_real_space(self, space_id=None):
+    def encode_real_space(self, room_type='all', space_id=None):
         """
-        현실 공간 데이터를 인코딩하여 임베딩 벡터 생성
+        현실 공간 데이터를 VAE 모델로 인코딩하여 임베딩 생성
         
         Args:
-            space_id: 인코딩할 특정 현실 공간 ID (None이면, 모든 공간 중 첫 번째 공간)
+            room_type: 방 유형 ('bedroom', 'living', 'all' 등)
+            space_id: 특정 공간 ID (None이면 모든 공간 처리)
             
         Returns:
-            dict: 공간 ID를 키로, 임베딩 벡터를 값으로 하는 딕셔너리
+            embeddings: 현실 공간 임베딩 딕셔너리 {space_id: embedding}
         """
+        # 공간 데이터가 로드되지 않았다면 오류 발생
         if self.space_data is None:
             print("현실 공간 데이터가 로드되지 않았습니다. load_real_space_data()를 먼저 호출하세요.")
             return None
         
-        # 인코딩할 공간 ID 목록 결정
-        if space_id:
-            # 특정 ID만 인코딩
+        # 모델이 초기화되지 않았다면 오류 발생
+        if not isinstance(self.vae, nn.Module):
+            print("VAE 모델이 초기화되지 않았습니다.")
+            return None
+            
+        # 처리할 공간 ID 결정
+        space_ids = []
+        if space_id is not None:
+            # 특정 공간 ID만 처리
             space_ids = [space_id]
         else:
-            # 모든 스캔의 ID 추출
-            space_ids = [scan["scan"] for scan in self.space_data.get("scans", [])]
-            if not space_ids:
-                print("경고: 공간 데이터에서 스캔 정보를 찾을 수 없습니다.")
-                return None
-        
+            # 모든 공간 처리
+            space_ids = list(self.space_data["scans"].keys())
+            
+        # 각 공간별 임베딩 생성
         embeddings = {}
-        
         for current_space_id in space_ids:
-            print(f"{current_space_id} 공간 처리 중...")
+            print(f"현실 공간 인코딩 중: {current_space_id}")
             
             # 데이터 처리 및 텐서 변환 (room_type은 필요에 따라 설정)
             room_type = 'all'  # 또는 공간별 room_type 매핑 사용
@@ -198,15 +211,18 @@ class SpaceAdaptiveVAE:
             )
             
             # VAE 모델에 텐서를 전달하여 인코딩
+            # VAE_spaceadaptive.py 모델 내 encode_real_space_tensors() 참고
             embedding = self.vae.encode_real_space_tensors(objs_tensor, boxes_tensor, triples_tensor)
             embeddings[current_space_id] = embedding
         
-        # SpaceAdaptiveVAE와 VAE 모델 모두에 임베딩 저장
-        self.real_space_embedding = embeddings
+        # 임베딩을 VAE 모델의 멤버 변수에만 저장
         self.vae.real_space_embeddings = embeddings
         
-        print(f"현실 공간 인코딩 완료: {len(embeddings)} 공간")
-        return embeddings
+        # SpaceAdaptiveVAE 클래스에서는 참조만 유지
+        self.real_space_embedding = self.vae.real_space_embeddings
+        
+        print(f"현실 공간 인코딩 완료")
+        return self.vae.real_space_embeddings
     
     def set_cuda(self):
         """
@@ -215,10 +231,9 @@ class SpaceAdaptiveVAE:
         # VAE 모델 CUDA 설정
         self.vae.set_cuda()
         
-        # SpaceAdaptiveVAE의 임베딩도 CUDA로 이동
-        if self.real_space_embedding is not None:
-            self.real_space_embedding = {k: v.cuda() for k, v in self.real_space_embedding.items()}
-        
+        # 임베딩은 VAE 모델 내에서 관리되므로 여기서는 추가 작업 불필요
+        # real_space_embedding은 vae.real_space_embeddings의 참조임
+    
     def train_with_real_space(self, space_data_path, train_dataloader, epochs=10, room_type='all', space_id=None):
         """
         현실 공간 데이터를 활용하여 VAE 모델 학습
@@ -237,17 +252,20 @@ class SpaceAdaptiveVAE:
         if self.space_data is None:
             self.load_real_space_data(space_data_path)
         
-        # 2. 현실 공간 임베딩 생성
-        real_space_embedding = self.encode_real_space(space_id)
+        # 2. 현실 공간 임베딩 생성 (아직 생성되지 않은 경우)
+        if self.vae.real_space_embeddings is None:
+            self.encode_real_space(room_type, space_id)
         
         # 3. 일반적인 학습 과정은 train_spaceadaptive.py에서 처리
         # 여기서는 현실 공간 임베딩 값만 반환
         
-        return real_space_embedding
+        return self.vae.real_space_embeddings
     
     def encode_virtual_scene(self, scene_data):
         """
         가상 씬 데이터를 인코딩하여 임베딩 벡터 생성
+        identify_similar_virtual_scenes()에서 가상씬 임베딩과 현실공간 임베딩을 비교하기 위함.
+        encode_real_space()이랑 거의 유사한 기능 제공
         
         Args:
             scene_data: 가상 씬 데이터 (객체, 관계 등)
@@ -255,53 +273,33 @@ class SpaceAdaptiveVAE:
         Returns:
             scene_embedding: 가상 씬의 임베딩 벡터
         """
-        # 현실 공간 인코딩 로직과 유사하지만 가상 씬용으로 조정
-        objs = []
-        boxes = []
-        triples = []
+        objs = scene_data['objs']
+        boxes = scene_data['boxes']
+        triples = scene_data['triples']
         
-        # 1. 객체 정보 추출
-        for obj_id, obj_info in enumerate(scene_data["objects"]):
-            obj_class = obj_info["class"]
-            if obj_class in self.vae.vocab["object_name_to_idx"]:
-                class_idx = self.vae.vocab["object_name_to_idx"][obj_class]
-                objs.append(class_idx)
-                
-                # 바운딩 박스 정보
-                box = obj_info["bbox"]
-                if self.vae.with_angles:
-                    angle = obj_info.get("angle", 0)
-                    box.append(angle)
-                boxes.append(box)
+        # 이미 텐서인지 확인하고 변환
+        objs_tensor = objs if isinstance(objs, torch.Tensor) else torch.tensor(objs, dtype=torch.long)
+        boxes_tensor = boxes if isinstance(boxes, torch.Tensor) else torch.tensor(boxes, dtype=torch.float)
+        triples_tensor = triples if isinstance(triples, torch.Tensor) else torch.tensor(triples, dtype=torch.long)
         
-        # 2. 관계 정보 추출
-        for rel in scene_data["relationships"]:
-            subj_idx = rel["subject"]
-            obj_idx = rel["object"]
-            rel_type = rel["relation"]
-            
-            if rel_type in self.vae.vocab["pred_name_to_idx"]:
-                rel_idx = self.vae.vocab["pred_name_to_idx"][rel_type]
-                triples.append([subj_idx, rel_idx, obj_idx])
+        # 한 번에 CUDA로 이동
+        objs_tensor = objs_tensor.cuda()
+        boxes_tensor = boxes_tensor.cuda()
+        triples_tensor = triples_tensor.cuda()
         
-        # 3. 텐서 변환
-        objs_tensor = torch.tensor(objs, dtype=torch.long)
-        boxes_tensor = torch.tensor(boxes, dtype=torch.float)
-        triples_tensor = torch.tensor(triples, dtype=torch.long)
-        
-        # 4. 모델 타입에 따른 인코딩
+        # 모델 타입에 따른 인코딩
         if self.vae.type_ == 'v1_box' or self.vae.type_ == 'v2_box':
-            mu, _ = self.vae.vae_box.encoder(objs_tensor.cuda(), triples_tensor.cuda(), boxes_tensor.cuda(), None)
+            mu, _ = self.vae.vae_box.encoder(objs_tensor, triples_tensor, boxes_tensor, None)
         elif self.vae.type_ == 'v1_full':
-            mu, _ = self.vae.vae.encoder(objs_tensor.cuda(), triples_tensor.cuda(), boxes_tensor.cuda(), None)
+            mu, _ = self.vae.vae.encoder(objs_tensor, triples_tensor, boxes_tensor, None)
         elif self.vae.type_ == 'v2_full':
             if self.vae.vae_v2.clip:
                 dummy_text_feats = torch.zeros((len(objs), 512)).cuda()
                 dummy_rel_feats = torch.zeros((len(triples), 512)).cuda()
-                mu, _ = self.vae.vae_v2.encoder(objs_tensor.cuda(), triples_tensor.cuda(), boxes_tensor.cuda(), 
+                mu, _ = self.vae.vae_v2.encoder(objs_tensor, triples_tensor, boxes_tensor, 
                                               None, dummy_text_feats, dummy_rel_feats)
             else:
-                mu, _ = self.vae.vae_v2.encoder(objs_tensor.cuda(), triples_tensor.cuda(), boxes_tensor.cuda(), None)
+                mu, _ = self.vae.vae_v2.encoder(objs_tensor, triples_tensor, boxes_tensor, None)
                 
         return mu
     
@@ -325,7 +323,7 @@ class SpaceAdaptiveVAE:
         euclidean_sim = 1.0 - (euclidean_dist / max_dist)
         
         # 두 유사도의 가중 평균
-        similarity = 0.7 * cos_sim + 0.3 * euclidean_sim
+        similarity = 0.7 * cos_sim + 0.3 * euclidean_sim # TODO 가중치 값 정해지지 않음. 이렇게 임의로 설정 가능?
         
         return similarity.item()
     
@@ -342,7 +340,6 @@ class SpaceAdaptiveVAE:
         """
         if self.real_space_embedding is None:
             raise ValueError("현실 공간 임베딩이 없습니다. train_with_real_space를 먼저 호출하세요.")
-        
         similar_scenes = []
         
         # 각 가상 씬에 대해 유사도 계산
@@ -358,7 +355,7 @@ class SpaceAdaptiveVAE:
                     max_similarity = max(max_similarity, similarity)
                 similarity = max_similarity
             else:
-                similarity = self.calculate_embedding_similarity(self.real_space_embedding, scene_embedding)
+                similarity = self.calculate_embedding_similarity(self.real_space_embedding[self.space_id], scene_embedding)
                 
             similar_scenes.append((scene_id, scene_data, similarity))
         
@@ -721,7 +718,7 @@ class SpaceAdaptiveVAE:
         if self.hybrid_scene is None:
             raise ValueError("하이브리드 씬이 없습니다. generate_hybrid_scene_from_similar 또는 load_hybrid_scene을 먼저 호출하세요.")
         
-        # TODO: 구체적인 추론 로직 구현
+        # TODO: 구체적인 추론 로직 구현 => 나중에
         # 여기서는 하이브리드 씬을 기반으로 조건에 맞게 변형하거나 샘플링하는 로직이 필요
         
         return self.hybrid_scene

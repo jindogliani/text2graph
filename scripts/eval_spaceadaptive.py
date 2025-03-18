@@ -206,7 +206,7 @@ def evaluate():
         real_space_data = space_adaptive_vae.load_real_space_data(args.real_space_data)
         if real_space_data:
             print("현실 공간 데이터 임베딩 생성 중...")
-            real_space_embeddings = space_adaptive_vae.encode_real_space(args.real_space_id)
+            real_space_embeddings = space_adaptive_vae.encode_real_space(args.room_type, args.real_space_id)
             
             # CUDA 설정
             space_adaptive_vae.set_cuda()

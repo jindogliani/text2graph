@@ -212,9 +212,8 @@ def train():
         real_space_data = space_adaptive_vae.load_real_space_data(args.space_data_path)
         if real_space_data:
             print("현실 공간 데이터 임베딩 생성 중...")
-            real_space_embeddings = space_adaptive_vae.encode_real_space()
+            real_space_embeddings = space_adaptive_vae.encode_real_space(args.room_type, args.real_space_id)
             print(f"현실 공간 임베딩 생성 완료: {len(real_space_embeddings) if real_space_embeddings else 0}개 공간")
-            
             # CUDA 설정
             space_adaptive_vae.set_cuda()
 
@@ -380,7 +379,7 @@ def train():
             counter += 1
 
         # 에폭 완료 후 모델 저장
-        if epoch % args.snapshot == 0:
+        if epoch % args.snapshot == 0: # TODO 아직 스냅샷 args 정해지지 않음.
             model.save(args.exp, args.outf, epoch, counter)
         
         # 학습 종료 후 SpaceAdaptiveVAE 처리
@@ -388,22 +387,24 @@ def train():
             print("SpaceAdaptiveVAE 처리 시작...")
             
             # 1. 가상 씬 데이터셋 로드
-            print(f"가상 씬 데이터셋 로드 중 ({args.virtual_scenes_dir})...")
+            print(f"가상 씬 데이터셋 로드 중")
             virtual_scenes = {}
-            scene_files = glob.glob(os.path.join(args.virtual_scenes_dir, "*.json"))
-            for scene_file in scene_files:
-                scene_id = os.path.basename(scene_file).split('.')[0]
-                with open(scene_file, 'r') as f:
-                    virtual_scenes[scene_id] = json.load(f)
-            print(f"{len(virtual_scenes)}개의 가상 씬 데이터 로드 완료")
+            for i in range(len(dataset)):
+                data = dataset[i]
+                scene_id = data['scan_id']
+                scene_data = {
+                    'objs': data['encoder']['objs'],  # 객체 ID 매핑
+                    'boxes': data['encoder']['boxes'],  # 바운딩 박스 정보
+                    'triples': data['encoder']['triples']  # 관계 목록
+                }
+                virtual_scenes[scene_id] = scene_data
             
             # 3. 현실 공간 데이터 로드 (아직 로드하지 않은 경우)
-            if space_adaptive_vae.real_space_data is None:
+            if space_adaptive_vae.space_data is None:
                 space_adaptive_vae.load_real_space_data(args.space_data_path)
             
-            # 4. 현실 공간 임베딩 생성
-            print("현실 공간 임베딩 생성 중...")
-            real_space_embedding = space_adaptive_vae.train_with_real_space(args.space_data_path, dataloader)
+            # 4. 현실 공간 임베딩 활용 (중복 생성 제거)
+            # 이미 학습 시작 전에 생성한 임베딩을 재사용
             
             # 5. 유사 가상 씬 식별
             print("현실 공간과 유사한 가상 씬 식별 중...")
