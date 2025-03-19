@@ -206,16 +206,19 @@ def train():
     space_adaptive_vae = SpaceAdaptiveVAE(model)
     
     # 현실 공간 데이터 로드 및 임베딩
-    real_space_embeddings = None
+    real_space_embedding = None
+    space_data = None
     if args.use_real_space and args.space_data_path is not None:
         print("현실 공간 데이터 로드 중...")
-        real_space_data = space_adaptive_vae.load_real_space_data(args.space_data_path)
-        if real_space_data:
-            print("현실 공간 데이터 임베딩 생성 중...")
-            real_space_embeddings = space_adaptive_vae.encode_real_space(args.room_type, args.real_space_id)
-            print(f"현실 공간 임베딩 생성 완료: {len(real_space_embeddings) if real_space_embeddings else 0}개 공간")
-            # CUDA 설정
-            space_adaptive_vae.set_cuda()
+        # 3. 현실 공간 데이터 로드 및 임베딩 (아직 로드하지 않은 경우)
+        if space_adaptive_vae.space_data is None:
+            # train_with_real_space() 함수 호출로 통합 처리
+            space_data, _, _, _, real_space_embedding = space_adaptive_vae.train_with_real_space(
+                space_data_path=args.space_data_path,
+                room_type=args.room_type,
+                space_id=args.real_space_id
+            )
+            print(f"현실 공간 데이터 처리 완료: {len(space_data) if space_data else 0}개 공간")
 
     # 판별자 모델 설정
     if args.weight_D_box > 0:
@@ -399,12 +402,13 @@ def train():
                 }
                 virtual_scenes[scene_id] = scene_data
             
-            # 3. 현실 공간 데이터 로드 (아직 로드하지 않은 경우)
-            if space_adaptive_vae.space_data is None:
-                space_adaptive_vae.load_real_space_data(args.space_data_path)
-            
-            # 4. 현실 공간 임베딩 활용 (중복 생성 제거)
-            # 이미 학습 시작 전에 생성한 임베딩을 재사용
+            # 3. 현실 공간 데이터 로드 및 4. 현실 공간 임베딩 (아직도 없는 경우)
+            if space_data is None and real_space_embedding is None:
+                space_data, _, _, _, real_space_embedding = space_adaptive_vae.train_with_real_space(
+                    space_data_path=args.space_data_path,
+                    room_type=args.room_type,
+                    space_id=args.real_space_id
+                )
             
             # 5. 유사 가상 씬 식별
             print("현실 공간과 유사한 가상 씬 식별 중...")

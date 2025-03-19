@@ -35,25 +35,37 @@ class SpaceAdaptiveVAE:
         """
         self.vae = VAE
         self.config = config or {}
+        
+        # VAE 모델 확인
+        if self.vae is not None:
+            if isinstance(self.vae, type):
+                print(f"VAE 모델 클래스가 로드되었습니다: {self.vae.__name__}")
+            else:
+                print(f"VAE 모델 인스턴스가 로드되었습니다: {self.vae.__class__.__name__}")
+        else:
+            print("경고: VAE 모델이 로드되지 않았습니다.")
+            
         self.real_space_embedding = None
         self.similar_scenes = None
         self.hybrid_scene = None
+        self.space_data_preprocessed = None
         self.space_data = None
         self.space_id = "Lounge"
         self.room_type = "all"
         self.space_data_path = "/home/commonscenes/spaceadaptive/spacedata/spacedata.json"
         
-    def load_real_space_data(self, space_data_path):
+    def load_real_space_data(self, space_data_path): # 검수완료
         with open(space_data_path, 'r') as f:
             space_data = json.load(f)
         
-        self.space_data = space_data
+        self.space_data_preprocessed = space_data
+        space_data_preprocessed = space_data
         # VAE 모델에도 데이터 설정
-        self.vae.space_data = space_data
+        # self.vae.space_data = space_data
         print(f"현실 공간 데이터 로드 완료: {len(space_data)} 공간")
-        return space_data
+        return space_data_preprocessed
         
-    def space_data_processing(self, space_data, room_type='all', space_id='Lounge'):
+    def space_data_processing(self, space_data_preprocessed, room_type='all', space_id='Lounge'): # 검수완료
         """
         현실 공간 데이터를 SG-FRONT 형식으로 처리하여 텐서로 변환
         
@@ -65,6 +77,12 @@ class SpaceAdaptiveVAE:
         Returns:
             tuple: (objs_tensor, boxes_tensor, triples_tensor) 형태의 텐서 튜플
         """
+        # self.space_data가 None인 경우 초기화
+        if self.space_data is None:
+            self.space_data = {}
+        if space_id not in self.space_data:
+            self.space_data[space_id] = {}
+
         # 1. classes_*.txt 파일에서 클래스 목록 로드
         classes_file = f'/mnt/dataset/FRONT/classes_{room_type}.txt'
         object_idx_to_name = []
@@ -78,16 +96,16 @@ class SpaceAdaptiveVAE:
         
         # 2. 대상 스캔 찾기
         target_scan = None
-        for scan in space_data["scans"]:
+        for scan in space_data_preprocessed["scans"]:
             if scan["scan"] == space_id:
                 target_scan = scan
                 break
         
         if target_scan is None:
             print(f"경고: {space_id} ID를 가진 스캔을 찾을 수 없습니다.")
-            if len(space_data["scans"]) > 0:
-                print(f"대신 첫 번째 스캔({space_data['scans'][0]['scan']})을 사용합니다.")
-                target_scan = space_data["scans"][0]
+            if len(space_data_preprocessed["scans"]) > 0:
+                print(f"대신 첫 번째 스캔({space_data_preprocessed['scans'][0]['scan']})을 사용합니다.")
+                target_scan = space_data_preprocessed["scans"][0]
             else:
                 raise ValueError("처리할 스캔 데이터가 없습니다.")
         
@@ -161,13 +179,24 @@ class SpaceAdaptiveVAE:
             triples.append([i, 0, scene_idx])  # 0은 'in' 관계
         
         # 텐서 변환
-        objs_tensor = torch.tensor(objs, dtype=torch.long)
-        boxes_tensor = torch.tensor(boxes, dtype=torch.float)
-        triples_tensor = torch.tensor(triples, dtype=torch.long)
+        objs_tensor = objs if isinstance(objs, torch.Tensor) else torch.tensor(objs, dtype=torch.long)
+        boxes_tensor = boxes if isinstance(boxes, torch.Tensor) else torch.tensor(boxes, dtype=torch.float)
+        triples_tensor = triples if isinstance(triples, torch.Tensor) else torch.tensor(triples, dtype=torch.long)
         
-        return objs_tensor, boxes_tensor, triples_tensor
+        # train_spaceadaptive.py와 동일한 데이터 구조로 저장
+        self.space_data[space_id] = {
+            'objs': objs_tensor,
+            'boxes': boxes_tensor,
+            'triples': triples_tensor
+        }
+        
+        # VAE 모델에도 데이터 설정
+        self.vae.space_data = self.space_data
+        space_data = self.space_data
+
+        return space_data, objs_tensor, boxes_tensor, triples_tensor
     
-    def encode_real_space(self, room_type='all', space_id=None):
+    def encode_real_space(self, room_type='all', space_id=None): # 검수완료
         """
         현실 공간 데이터를 VAE 모델로 인코딩하여 임베딩 생성
         
@@ -195,7 +224,7 @@ class SpaceAdaptiveVAE:
             space_ids = [space_id]
         else:
             # 모든 공간 처리
-            space_ids = list(self.space_data["scans"].keys())
+            space_ids = list(self.space_data_preprocessed["scans"].keys())
             
         # 각 공간별 임베딩 생성
         embeddings = {}
@@ -204,8 +233,8 @@ class SpaceAdaptiveVAE:
             
             # 데이터 처리 및 텐서 변환 (room_type은 필요에 따라 설정)
             room_type = 'all'  # 또는 공간별 room_type 매핑 사용
-            objs_tensor, boxes_tensor, triples_tensor = self.space_data_processing(
-                space_data=self.space_data,
+            space_data, objs_tensor, boxes_tensor, triples_tensor = self.space_data_processing(
+                space_data_preprocessed=self.space_data_preprocessed,
                 room_type=room_type, 
                 space_id=current_space_id
             )
@@ -217,7 +246,6 @@ class SpaceAdaptiveVAE:
         
         # 임베딩을 VAE 모델의 멤버 변수에만 저장
         self.vae.real_space_embeddings = embeddings
-        
         # SpaceAdaptiveVAE 클래스에서는 참조만 유지
         self.real_space_embedding = self.vae.real_space_embeddings
         
@@ -234,42 +262,50 @@ class SpaceAdaptiveVAE:
         # 임베딩은 VAE 모델 내에서 관리되므로 여기서는 추가 작업 불필요
         # real_space_embedding은 vae.real_space_embeddings의 참조임
     
-    def train_with_real_space(self, space_data_path, train_dataloader, epochs=10, room_type='all', space_id=None):
+    def train_with_real_space(self, space_data_path='/home/commonscenes/spaceadaptive/spacedata/spacedata.json', room_type='all', space_id=None): # 검수완료
         """
-        현실 공간 데이터를 활용하여 VAE 모델 학습
-        
+        현실 공간 데이터를 로드하고 전처리한 후 VAE 모델에 임베딩 생성
+        한번의 함수 호출로 load_real_space_data, space_data_processing, encode_real_space 작업 수행
         Args:
             space_data_path: 현실 공간 데이터 파일 경로
-            train_dataloader: 학습용 데이터로더
-            epochs: 학습 에폭 수
             room_type: 방 유형 ('bedroom', 'living', 'all' 등)
             space_id: 특정 공간 ID (None이면 모든 공간 처리)
-            
         Returns:
-            real_space_embedding: 학습 후 현실 공간 임베딩
+            tuple: (space_data, objs_tensor, boxes_tensor, triples_tensor, real_space_embedding)
         """
         # 1. 모델이 아직 현실 공간 데이터를 로드하지 않았다면 로드
         if self.space_data is None:
-            self.load_real_space_data(space_data_path)
+            self.space_data_preprocessed = self.load_real_space_data(space_data_path)
+            space_data, objs_tensor, boxes_tensor, triples_tensor = self.space_data_processing(self.space_data_preprocessed, room_type, space_id)
+        else:
+            # 이미 데이터가 로드되어 있는 경우
+            space_data = self.space_data
+            if space_id in self.space_data:
+                objs_tensor = self.space_data[space_id]['objs']
+                boxes_tensor = self.space_data[space_id]['boxes']
+                triples_tensor = self.space_data[space_id]['triples']
+            else:
+                # space_id가 없는 경우 처리
+                space_data, objs_tensor, boxes_tensor, triples_tensor = self.space_data_processing(self.space_data_preprocessed, room_type, space_id)
         
         # 2. 현실 공간 임베딩 생성 (아직 생성되지 않은 경우)
-        if self.vae.real_space_embeddings is None:
-            self.encode_real_space(room_type, space_id)
+        if not hasattr(self.vae, 'real_space_embeddings') or self.vae.real_space_embeddings is None:
+            real_space_embedding = self.encode_real_space(room_type, space_id)
+        else:
+            real_space_embedding = self.vae.real_space_embeddings
         
-        # 3. 일반적인 학습 과정은 train_spaceadaptive.py에서 처리
-        # 여기서는 현실 공간 임베딩 값만 반환
+        # CUDA 설정
+        self.set_cuda()
         
-        return self.vae.real_space_embeddings
+        return space_data, objs_tensor, boxes_tensor, triples_tensor, real_space_embedding
     
-    def encode_virtual_scene(self, scene_data):
+    def encode_virtual_scene(self, scene_data): # 검수완료
         """
         가상 씬 데이터를 인코딩하여 임베딩 벡터 생성
         identify_similar_virtual_scenes()에서 가상씬 임베딩과 현실공간 임베딩을 비교하기 위함.
         encode_real_space()이랑 거의 유사한 기능 제공
-        
         Args:
             scene_data: 가상 씬 데이터 (객체, 관계 등)
-            
         Returns:
             scene_embedding: 가상 씬의 임베딩 벡터
         """
@@ -303,14 +339,12 @@ class SpaceAdaptiveVAE:
                 
         return mu
     
-    def calculate_embedding_similarity(self, embedding1, embedding2):
+    def calculate_embedding_similarity(self, embedding1, embedding2): # 검수완료
         """
         두 임베딩 벡터 간의 유사도 계산
-        
         Args:
             embedding1: 첫 번째 임베딩 벡터
             embedding2: 두 번째 임베딩 벡터
-            
         Returns:
             similarity: 두 임베딩 간의 유사도 (0~1 범위)
         """
@@ -327,14 +361,12 @@ class SpaceAdaptiveVAE:
         
         return similarity.item()
     
-    def identify_similar_virtual_scenes(self, virtual_scenes_dataset, top_k=10):
+    def identify_similar_virtual_scenes(self, virtual_scenes_dataset, top_k=10): # 검수완료
         """
         현실 공간과 유사한 가상 씬들을 식별
-        
         Args:
             virtual_scenes_dataset: 가상 씬 데이터셋
             top_k: 반환할 상위 유사 씬 개수
-            
         Returns:
             similar_scenes: (씬, 유사도) 튜플의 리스트
         """
@@ -365,13 +397,12 @@ class SpaceAdaptiveVAE:
         
         return self.similar_scenes
     
-    def analyze_space_regions(self, space_data):
+    def analyze_space_regions(self, space_id, space_data): # 검수완료
         """
         공간을 의미 있는 영역으로 분할
-        
         Args:
+            space_id: 분석할 공간 ID
             space_data: 분석할 공간 데이터
-            
         Returns:
             regions: 식별된 영역들의 딕셔너리
         """
@@ -379,76 +410,95 @@ class SpaceAdaptiveVAE:
         obj_positions = []
         obj_info = []
         
-        for obj_id, obj in space_data["objects"].items():
-            if "bbox" in obj:
-                # 바운딩 박스의 중심 위치 계산
-                center_x = obj["bbox"][0]
-                center_y = obj["bbox"][1]
-                center_z = obj["bbox"][2]
-                obj_positions.append([center_x, center_y, center_z])
-                obj_info.append({
-                    "id": obj_id,
-                    "class": obj["class"],
-                    "bbox": obj["bbox"]
-                })
+        # 현실 공간의 data_processing()이 끝나 있어야 함.
+        for i in range(len(space_data[space_id]["objs"])):
+            # boxes 텐서에서 중심 위치 추출 (x, y, z)
+            center_x = space_data[space_id]["boxes"][i][3]
+            center_y = space_data[space_id]["boxes"][i][4]
+            center_z = space_data[space_id]["boxes"][i][5]
+            obj_positions.append([center_x, center_y, center_z])
+            obj_info.append({
+                "id": i,
+                "class": space_data[space_id]["objs"][i].item(),  # 텐서에서 값 추출
+                "boxes": space_data[space_id]["boxes"][i]
+            })
         
         if not obj_positions:
-            return {"entire_space": space_data}
+            return {"entire_space": space_data[space_id]}
         
         # 2. 밀도 기반 클러스터링으로 영역 식별
         positions_array = np.array(obj_positions)
         clustering = DBSCAN(eps=1.5, min_samples=2).fit(positions_array)
         labels = clustering.labels_
+        # labels = array([0, 0, 1, 1, -1, 0, 2, 2, 1, -1])
         
         # 3. 클러스터별로 객체 그룹화
-        regions = defaultdict(lambda: {"objects": {}, "relationships": []})
+        regions = {}
+        for label in set(labels): # {0, 1, 2, -1}
+            region_name = f"region_{label}" if label >= 0 else "outliers"
+            regions[region_name] = {
+                "objs": [],      # 객체 인덱스 리스트
+                "obj_classes": [],  # 객체 클래스 리스트
+                "boxes": [],     # 바운딩 박스 리스트
+                "triples": []    # 관계 리스트
+            }
         
+        # 객체를 해당 영역에 할당
+        # labels 인덱싱이랑 space_data[space_id]["objs"], obj_info 인덱싱이랑 같음.
         for i, label in enumerate(labels):
             region_name = f"region_{label}" if label >= 0 else "outliers"
-            obj_id = obj_info[i]["id"]
-            regions[region_name]["objects"][obj_id] = obj_info[i]
+            regions[region_name]["objs"].append(i)  # 객체 인덱스 추가
+            regions[region_name]["obj_classes"].append(obj_info[i]["class"])  # 객체 클래스 추가
+            regions[region_name]["boxes"].append(obj_info[i]["boxes"])  # 박스 정보 추가
         
         # 4. 관계 정보 분배
-        for rel in space_data.get("relationships", []):
-            subj_id = str(rel["subject"])
-            obj_id = str(rel["object"])
+        # triples 텐서는 [subject_idx, relation_type, object_idx] 형태
+        for triple_idx in range(space_data[space_id]["triples"].shape[0]):
+            triple = space_data[space_id]["triples"][triple_idx]
+            subj_id = triple[0].item()  # 주체 객체 인덱스
+            rel_type = triple[1].item()  # 관계 유형
+            obj_id = triple[2].item()    # 대상 객체 인덱스
             
             # 두 객체가 같은 영역에 있는 관계만 해당 영역에 할당
             for region_name, region_data in regions.items():
-                if subj_id in region_data["objects"] and obj_id in region_data["objects"]:
-                    regions[region_name]["relationships"].append(rel)
+                if subj_id in region_data["objs"] and obj_id in region_data["objs"]:
+                    # 해당 영역에 관계 추가
+                    regions[region_name]["triples"].append([subj_id, rel_type, obj_id])
         
-        return dict(regions)
+        # 각 영역의 텐서 데이터 변환
+        for region_name, region_data in regions.items():
+            # 리스트를 텐서로 변환
+            regions[region_name]["objs"] = torch.tensor(region_data["obj_classes"])
+            regions[region_name]["boxes"] = torch.stack(region_data["boxes"]) if region_data["boxes"] else torch.tensor([])
+            regions[region_name]["triples"] = torch.tensor(region_data["triples"]) if region_data["triples"] else torch.tensor([])
+        
+        return regions
     
-    def split_scene_into_fragments(self, scene_data):
+    def split_scene_into_fragments(self, scene_id, scene_data): # 검수 완료
         """
-        가상 씬을 작은 조각(프래그먼트)으로 분할
-        
+        가상 씬을 작은 조각으로 분할
         Args:
             scene_data: 분할할 가상 씬 데이터
-            
         Returns:
             fragments: 씬 조각들의 리스트
         """
         # 공간 영역 분석 함수를 활용하여 씬을 조각으로 분할
-        regions = self.analyze_space_regions(scene_data)
+        regions = self.analyze_space_regions(scene_id, scene_data)
         
         # 각 영역을 독립적인 조각으로 변환
         fragments = []
         for region_name, region_data in regions.items():
-            if len(region_data["objects"]) >= 2:  # 최소 2개 이상의 객체가 있는 영역만 고려
+            if len(region_data["objs"]) >= 2:  # 최소 2개 이상의 객체가 있는 영역만 고려
                 fragments.append(region_data)
         
         return fragments
     
-    def find_best_matching_fragment(self, target_region, similar_scenes):
+    def find_best_matching_fragment(self, target_region, similar_scenes): # 검수 완료
         """
         대상 영역과 가장 잘 맞는 가상 씬 조각 탐색
-        
         Args:
             target_region: 맞출 대상 영역 데이터
             similar_scenes: 유사 가상 씬 리스트
-            
         Returns:
             best_fragment: 가장 적합한 씬 조각
         """
@@ -456,18 +506,17 @@ class SpaceAdaptiveVAE:
         best_similarity = 0
         
         # 각 유사 씬에서 조각 추출 및 유사도 계산
-        for _, scene_data, overall_similarity in similar_scenes:
-            fragments = self.split_scene_into_fragments(scene_data)
+        for scene_id, scene_data, overall_similarity in similar_scenes: # (scene_id, scene_data, similarity)
+            fragments = self.split_scene_into_fragments(scene_id, scene_data)
             
             for fragment in fragments:
                 # 대상 영역과 조각 간의 유사도 계산
-                region_embedding = self.encode_virtual_scene(target_region)
-                fragment_embedding = self.encode_virtual_scene(fragment)
-                
+                region_embedding = self.encode_virtual_scene(target_region) # target_region도 {"region_0": region_data(scene_data)}에서 region_data만 갖고 옴.
+                fragment_embedding = self.encode_virtual_scene(fragment) # fragment는 region_data여서 바로 들어가도 될 듯.
                 fragment_similarity = self.calculate_embedding_similarity(region_embedding, fragment_embedding)
                 
                 # 기존 씬의 전체 유사도도 고려하여 가중치 부여
-                weighted_similarity = 0.7 * fragment_similarity + 0.3 * overall_similarity
+                weighted_similarity = 0.7 * fragment_similarity + 0.3 * overall_similarity #TODO 가중치 조정 필요
                 
                 if weighted_similarity > best_similarity:
                     best_similarity = weighted_similarity
@@ -475,7 +524,7 @@ class SpaceAdaptiveVAE:
         
         return best_fragment
     
-    def integrate_fragment(self, hybrid_scene, fragment, target_region):
+    def integrate_fragment(self, hybrid_scene, fragment, target_region): # TODO 검수필요
         """
         가상 씬 조각을 하이브리드 씬에 통합
         
@@ -632,7 +681,7 @@ class SpaceAdaptiveVAE:
             
             obj2["bbox"] = bbox
     
-    def generate_hybrid_scene_from_similar(self, real_space_data=None):
+    def generate_hybrid_scene_from_similar(self, space_data=None):
         """
         식별된 유사 가상 씬들을 조합하여 하이브리드 씬 생성
         
@@ -644,16 +693,13 @@ class SpaceAdaptiveVAE:
         """
         if self.similar_scenes is None:
             raise ValueError("유사 가상 씬이 식별되지 않았습니다. identify_similar_virtual_scenes를 먼저 호출하세요.")
-        
-        if real_space_data is None:
-            real_space_data = self.vae.real_space_data
-            
-        if real_space_data is None:
+        if space_data is None:
+            space_data = self.space_data
+        if space_data is None:
             raise ValueError("현실 공간 데이터가 없습니다.")
         
         # 1. 공간을 영역으로 분할
-        real_space_regions = self.analyze_space_regions(real_space_data)
-        
+        real_space_regions = self.analyze_space_regions(self.space_id, space_data)
         # 2. 하이브리드 씬 초기화
         hybrid_scene = {"objects": {}, "relationships": []}
         
@@ -725,12 +771,136 @@ class SpaceAdaptiveVAE:
 
 if __name__ == "__main__":
     print("SpaceAdaptiveVAE 테스트 실행")
-    
-    # 테스트 모드로 SpaceAdaptiveVAE 인스턴스 생성
-    space_adaptive_vae = SpaceAdaptiveVAE(vae_model=None)
-    space_data = space_adaptive_vae.load_real_space_data("/home/commonscenes/spaceadaptive/spacedata/spacedata.json")
-    objs, boxes, triples = space_adaptive_vae.space_data_processing(space_data=space_data, room_type='all', space_id='Lounge')
 
-    print(f"처리 결과: {len(objs)} 객체, {len(triples)} 관계")
-    print(f"객체 클래스: {objs}")
-    print(f"관계 트리플: {triples}")
+    # from model.VAE_spaceadaptive import VAE
+    # VAE = VAE(type='v2_full')
+    space_adaptive_vae = SpaceAdaptiveVAE(vae_model=VAE)
+    
+    space_data_preprocessed = space_adaptive_vae.load_real_space_data("/home/commonscenes/spaceadaptive/spacedata/spacedata.json")
+    space_data, objs, boxes, triples = space_adaptive_vae.space_data_processing(space_data_preprocessed=space_data_preprocessed, room_type='all', space_id='Lounge')
+    # space_data, objs, boxes, triples, real_space_embedding = space_adaptive_vae.train_with_real_space(space_data_path="/home/commonscenes/spaceadaptive/spacedata/spacedata.json", room_type='all', space_id='Lounge')
+    real_space_regions = space_adaptive_vae.analyze_space_regions(space_id='Lounge', space_data=space_data)
+    # 클러스터링이 되기는 하는데 2개만 생기고 나머지 객체가 전부다 아웃라이어가 되어버리네...
+    
+    # print(space_data)
+    '''
+    {'Lounge': {'objs': tensor([14,  2, 31,  2,  5, 12, 29,  3,  3, 35,  0]), 'boxes': tensor([[ 1.0000e+00,  1.1991e+00,  1.8504e+00,  1.2800e+00, -5.4659e-02,
+         -7.3731e-02,  1.2000e+01],
+        [ 5.2918e-01,  2.2284e+00,  9.6057e-01, -3.0798e+00,  4.7320e-01,
+          5.8112e-01,  1.2000e+01],
+        [ 2.4411e+00,  8.8599e-01,  1.4663e+00, -7.4000e-01, -2.2885e-01,
+          2.8200e+00,  1.8000e+01],
+        [ 4.6071e-01,  1.7600e+00,  9.3456e-01,  3.2400e+00,  3.0631e-01,
+          6.4300e-01,  2.4000e+01],
+        [ 9.4635e-01,  1.2330e+00,  9.5529e-01, -5.3011e-02,  5.5067e-03,
+         -2.1411e+00,  2.4000e+01],
+        [ 9.5067e-01,  8.9378e-01,  1.8182e+00, -1.0436e+00, -1.1823e-01,
+         -2.5364e+00,  1.2000e+01],
+        [ 1.0000e+00,  8.7200e-01,  2.4578e+00, -2.6360e+00, -1.0634e-01,
+         -2.2496e+00,  2.4000e+01],
+        [ 6.3734e-01,  1.9979e+00,  1.0000e+00,  1.2993e+00,  3.9340e-01,
+         -1.5200e+00,  2.4000e+01],
+        [ 4.6416e-01,  2.3129e+00,  1.2526e+00, -2.9530e+00,  5.7089e-01,
+          2.7130e+00,  1.8000e+01],
+        [ 7.2600e+00,  2.2204e-16,  8.4485e+00,  1.5140e-01, -6.7000e-01,
+         -6.4500e-02,  1.2000e+01],
+        [-1.0000e+00, -1.0000e+00, -1.0000e+00, -1.0000e+00, -1.0000e+00,
+         -1.0000e+00, -1.0000e+00]]), 'triples': tensor([[ 0,  3,  3],
+        [ 0,  2,  7],
+        [ 0, 14,  2],
+        [ 0,  5,  4],
+        [ 1, 14,  3],
+        [ 1,  1,  8],
+        [ 1,  2,  6],
+        [ 1,  5,  5],
+        [ 1, 11,  8],
+        [ 2,  5,  0],
+        [ 2,  5,  1],
+        [ 2,  2,  8],
+        [ 3, 14,  1],
+        [ 3,  3,  0],
+        [ 3,  5,  7],
+        [ 4,  3,  5],
+        [ 4,  4,  7],
+        [ 4,  5,  0],
+        [ 4,  3,  6],
+        [ 4,  9,  5],
+        [ 5,  3,  4],
+        [ 5,  4,  6],
+        [ 5,  5,  6],
+        [ 5,  5,  0],
+        [ 5,  8,  4],
+        [ 6,  3,  5],
+        [ 6,  5,  4],
+        [ 6,  3,  4],
+        [ 6,  1,  1],
+        [ 7,  1,  0],
+        [ 7,  4,  4],
+        [ 7,  5,  3],
+        [ 7, 14,  8],
+        [ 7,  9,  8],
+        [ 8, 10,  7],
+        [ 8,  2,  1],
+        [ 8,  3,  2],
+        [ 8, 10,  1],
+        [ 0,  7,  9],
+        [ 1,  7,  9],
+        [ 2,  7,  9],
+        [ 3,  7,  9],
+        [ 4,  7,  9],
+        [ 5,  7,  9],
+        [ 6,  7,  9],
+        [ 7,  7,  9],
+        [ 8,  7,  9],
+        [ 0,  0, 10],
+        [ 1,  0, 10],
+        [ 2,  0, 10],
+        [ 3,  0, 10],
+        [ 4,  0, 10],
+        [ 5,  0, 10],
+        [ 6,  0, 10],
+        [ 7,  0, 10],
+        [ 8,  0, 10],
+        [ 9,  0, 10]])}}
+    '''
+
+    print(real_space_regions)
+    '''
+    {'region_0': {'objs': tensor([14, 35]), 'obj_classes': [14, 35], 'boxes': tensor([[ 1.0000e+00,  1.1991e+00,  1.8504e+00,  1.2800e+00, -5.4659e-02,
+         -7.3731e-02,  1.2000e+01],
+        [ 7.2600e+00,  2.2204e-16,  8.4485e+00,  1.5140e-01, -6.7000e-01,
+         -6.4500e-02,  1.2000e+01]]), 'triples': tensor([[0, 7, 9]])}, 'region_1': {'objs': tensor([ 5, 12]), 'obj_classes': [5, 12], 'boxes': tensor([[ 9.4635e-01,  1.2330e+00,  9.5529e-01, -5.3011e-02,  5.5067e-03,
+         -2.1411e+00,  2.4000e+01],
+        [ 9.5067e-01,  8.9378e-01,  1.8182e+00, -1.0436e+00, -1.1823e-01,
+         -2.5364e+00,  1.2000e+01]]), 'triples': tensor([[4, 3, 5],
+        [4, 9, 5],
+        [5, 3, 4],
+        [5, 8, 4]])}, 'outliers': {'objs': tensor([ 2, 31,  2, 29,  3,  3,  0]), 'obj_classes': [2, 31, 2, 29, 3, 3, 0], 'boxes': tensor([[ 0.5292,  2.2284,  0.9606, -3.0798,  0.4732,  0.5811, 12.0000],
+        [ 2.4411,  0.8860,  1.4663, -0.7400, -0.2289,  2.8200, 18.0000],
+        [ 0.4607,  1.7600,  0.9346,  3.2400,  0.3063,  0.6430, 24.0000],
+        [ 1.0000,  0.8720,  2.4578, -2.6360, -0.1063, -2.2496, 24.0000],
+        [ 0.6373,  1.9979,  1.0000,  1.2993,  0.3934, -1.5200, 24.0000],
+        [ 0.4642,  2.3129,  1.2526, -2.9530,  0.5709,  2.7130, 18.0000],
+        [-1.0000, -1.0000, -1.0000, -1.0000, -1.0000, -1.0000, -1.0000]]), 'triples': tensor([[ 1, 14,  3],
+        [ 1,  1,  8],
+        [ 1,  2,  6],
+        [ 1, 11,  8],
+        [ 2,  5,  1],
+        [ 2,  2,  8],
+        [ 3, 14,  1],
+        [ 3,  5,  7],
+        [ 6,  1,  1],
+        [ 7,  5,  3],
+        [ 7, 14,  8],
+        [ 7,  9,  8],
+        [ 8, 10,  7],
+        [ 8,  2,  1],
+        [ 8,  3,  2],
+        [ 8, 10,  1],
+        [ 1,  0, 10],
+        [ 2,  0, 10],
+        [ 3,  0, 10],
+        [ 6,  0, 10],
+        [ 7,  0, 10],
+        [ 8,  0, 10]])}}
+    '''
