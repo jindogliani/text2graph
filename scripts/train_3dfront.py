@@ -89,6 +89,9 @@ print(args)
 # v1_box: Graph-to-Box, v1_full: Graph-to-3D (DeepSDF version) v2_box:layout branch of CommonScenes, v2_full: CommonScenes
 # --batchSize 8 --workers 8 --loadmodel False --nepoch 10000 --large False
 
+# CLIP 없이도 가능한지 테스트용
+# python train_3dfront.py --room_type livingroom --dataset /mnt/dataset/FRONT --residual True --network_type v2_full --with_SDF True --with_CLIP False --batchSize 8 --workers 8 --exp ../experiments/test
+
 def parse_data(data):
     enc_objs, enc_triples, enc_tight_boxes, enc_objs_to_scene, enc_triples_to_scene = data['encoder']['objs'], \
                                                                                       data['encoder']['tripltes'], \

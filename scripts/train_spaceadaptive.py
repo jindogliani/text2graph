@@ -1,39 +1,46 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os
-import sys
-import json
-import time
-import glob
-import random
+from __future__ import print_function
 import argparse
+import os
+import random
 import numpy as np
-from datetime import datetime
+import torch
+import torch.nn.parallel
+import torch.nn.functional as F
+import torch.optim as optim
+import torch.utils.data
+import sys
+import time
+import json
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.tensorboard import SummaryWriter
+from tensorboardX import SummaryWriter
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+sys.path.append('../')
+from dataset.threedfront_dataset import ThreedFrontDatasetSceneGraph
 from model.VAE_spaceadaptive import VAE
 from spaceadaptive.SpaceAdaptiveVAE import SpaceAdaptiveVAE
-from model.discriminator import BoxDiscriminator, ShapeAuxillary
-from dataset.threedfront_dataset import ThreedFrontDatasetSceneGraph
-from helpers.metrics import calculate_model_losses
-from helpers.util import bool_flag, bce_loss
+from model.discriminators import BoxDiscriminator, ShapeAuxillary
+from model.losses import bce_loss
+from helpers.util import bool_flag, _CustomDataParallel
+
+from model.losses import calculate_model_losses
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--exp', default='../experiments/spaceadaptive', help='실험 결과 저장 경로')
+parser.add_argument('--exp', default='../experiments/space_adaptive', help='실험 결과 저장 경로')
 parser.add_argument('--logf', default='logs', help='로그 저장 경로')
-parser.add_argument('--outf', default='models', help='모델 저장 경로')
-parser.add_argument('--dataset', default='../GT', help='데이터셋 경로')
-parser.add_argument('--room_type', default='livingroom', help='방 타입 [livingroom, bedroom, diningroom, library]')
-parser.add_argument('--workers', type=int, help='데이터 로딩 워커 수', default=6)
-parser.add_argument('--batchSize', type=int, default=32, help='배치 크기')
-parser.add_argument('--nepoch', type=int, default=10000, help='최대 에폭 수')
+parser.add_argument('--outf', default='checkpoint', help='모델 저장 경로')
+parser.add_argument('--dataset', default='/mnt/dataset/FRONT', help='데이터셋 경로')
+parser.add_argument('--room_type', default='all', help='방 타입 [livingroom, bedroom, diningroom, library]')
+parser.add_argument('--workers', type=int, help='데이터 로딩 워커 수', default=8)
+parser.add_argument('--batchSize', type=int, default=8, help='배치 크기')
+parser.add_argument('--nepoch', type=int, default=2200, help='최대 에폭 수')
 parser.add_argument('--weight_D_box', type=float, default=0.1, help='박스 판별자 가중치')
 parser.add_argument('--auxlr', type=float, default=0.0001, help='보조 네트워크 학습률')
 parser.add_argument('--shuffle_objs', default=False, type=bool_flag, help='객체 셔플 여부')
@@ -64,29 +71,30 @@ parser.add_argument('--real_space_id', default='Lounge', type=str, help='특정 
 parser.add_argument('--real_space_weight', default=0.3, type=float, help='현실 공간 임베딩 가중치 (0~1)')
 parser.add_argument('--real_space_loss_weight', default=0.5, type=float, help='현실 공간 손실 가중치')
 parser.add_argument('--real_space_condition_freq', default=0.7, type=float, help='현실 공간 조건화 빈도 (0~1)')
+parser.add_argument('--snapshot', default=25, type=int, help='모델 저장 주기 (에폭 단위)')
 
 # SpaceAdaptiveVAE 관련 추가 인자
-parser.add_argument('--use_space_adaptive', default=False, type=bool_flag, help='SpaceAdaptiveVAE 사용 여부')
-parser.add_argument('--virtual_scenes_dir', default='../datasample/SG-FRONT', type=str, help='가상 씬 데이터셋 경로')
+parser.add_argument('--use_space_adaptive', default=True, type=bool_flag, help='SpaceAdaptiveVAE 사용 여부')
 parser.add_argument('--hybrid_scene_output', default='../spaceadaptive/hybrid_scene.json', type=str, help='생성된 하이브리드 씬 저장 경로')
-parser.add_argument('--top_k_scenes', default=20, type=int, help='선택할 상위 유사 씬 개수')
+parser.add_argument('--top_k_scenes', default=50, type=int, help='선택할 상위 유사 씬 개수')
+
+# python train_spaceadaptive.py --room_type all --dataset /mnt/dataset/FRONT --residual True --network_type v2_box --with_SDF True --with_CLIP True --batchSize 8 --workers 8 --nepoch 2051 --large True
+# python train_spaceadaptive.py --room_type all --dataset /mnt/dataset/FRONT --residual True --network_type v2_full --with_SDF True --with_CLIP False --batchSize 8 --workers 8 --nepoch 2051 --large True
 
 args = parser.parse_args()
 print(args)
 
 def parse_data(data):
     enc_objs, enc_triples, enc_tight_boxes, enc_objs_to_scene, enc_triples_to_scene = data['encoder']['objs'], \
-                                                                                       data['encoder']['tripltes'], \
-                                                                                       data['encoder']['boxes'], \
-                                                                                       data['encoder'][
-                                                                                           'obj_to_scene'], \
-                                                                                       data['encoder'][
-                                                                                           'triple_to_scene']
+                                                                                      data['encoder']['tripltes'], \
+                                                                                      data['encoder']['boxes'], \
+                                                                                      data['encoder'][
+                                                                                          'obj_to_scene'], \
+                                                                                      data['encoder'][
+                                                                                          'triple_to_scene']
     if args.with_feats:
         encoded_enc_f = data['encoder']['feats'] #사전 인코딩된 latent point features를 가져옴.
         encoded_enc_f = encoded_enc_f.cuda() #텐서를 GPU로 이동
-    else:
-        encoded_enc_f = None
 
     encoded_enc_text_feat = None
     encoded_enc_rel_feat = None
@@ -99,48 +107,69 @@ def parse_data(data):
         encoded_dec_rel_feat = data['decoder']['rel_feats'].cuda()
 
     dec_objs, dec_triples, dec_tight_boxes, dec_objs_to_scene, dec_triples_to_scene = data['decoder']['objs'], \
-                                                                                       data['decoder']['tripltes'], \
-                                                                                       data['decoder']['boxes'], \
-                                                                                       data['decoder'][
-                                                                                           'obj_to_scene'], \
-                                                                                       data['decoder'][
-                                                                                           'triple_to_scene']
-    if args.with_feats:
+                                                                                      data['decoder']['tripltes'], \
+                                                                                      data['decoder']['boxes'], \
+                                                                                      data['decoder']['obj_to_scene'], \
+                                                                                      data['decoder']['triple_to_scene']
+    dec_objs_grained = data['decoder']['objs_grained']
+    dec_sdfs = None
+    if 'sdfs' in data['decoder']:
+        dec_sdfs = data['decoder']['sdfs']
+    if 'feats' in data['decoder']:
         encoded_dec_f = data['decoder']['feats']
         encoded_dec_f = encoded_dec_f.cuda()
-    else:
-        encoded_dec_f = None
 
-    if args.with_SDF:
-        dec_sdfs = data['decoder']['sdfs']
-        dec_sdfs = dec_sdfs.cuda()
-    else:
-        dec_sdfs = None
+    # changed nodes
+    missing_nodes = data['missing_nodes']
+    manipulated_nodes = data['manipulated_nodes']
 
-    if args.with_angles:
-        enc_angles = data['encoder']['angles']
-        dec_angles = data['decoder']['angles']
-        enc_angles = enc_angles.cuda()
-        dec_angles = dec_angles.cuda()
-    else:
-        enc_angles = None
-        dec_angles = None
+    enc_objs, enc_triples, enc_tight_boxes = enc_objs.cuda(), enc_triples.cuda(), enc_tight_boxes.cuda()
+    dec_objs, dec_triples, dec_tight_boxes = dec_objs.cuda(), dec_triples.cuda(), dec_tight_boxes.cuda()
+    dec_objs_grained = dec_objs_grained.cuda()
 
-    enc_tight_boxes = enc_tight_boxes.cuda()
-    dec_tight_boxes = dec_tight_boxes.cuda()
+    enc_scene_nodes = enc_objs == 0
+    dec_scene_nodes = dec_objs == 0
+    if not args.with_feats:
+        with torch.no_grad():
+            encoded_enc_f = None  # TODO #HJS
+            encoded_dec_f = None  # TODO
+
+    # set all scene (dummy) node encodings to zero
+    try:
+        encoded_enc_f[enc_scene_nodes] = torch.zeros(
+            [torch.sum(enc_scene_nodes), encoded_enc_f.shape[1]]).float().cuda()
+        encoded_dec_f[dec_scene_nodes] = torch.zeros(
+            [torch.sum(dec_scene_nodes), encoded_dec_f.shape[1]]).float().cuda()
+    except:
+        if args.network_type == 'v1_box':
+            encoded_enc_f = None
+            encoded_dec_f = None
+
+    if args.num_box_params == 7:
+        # all parameters, including angle, procesed by the box_net
+        enc_boxes = enc_tight_boxes
+        dec_boxes = dec_tight_boxes
+    elif args.num_box_params == 6:
+        # no angle. this will be learned separately if with_angle is true
+        enc_boxes = enc_tight_boxes[:, :6]
+        dec_boxes = dec_tight_boxes[:, :6]
+    else:
+        raise NotImplementedError
+
+    # limit the angle bin range from 0 to 24
+    # enc_angles의 값이 0 ~ 23 범위 안에 있도록 보정됨
+    enc_angles = enc_tight_boxes[:, 6].long() - 1
+    enc_angles = torch.where(enc_angles > 0, enc_angles, torch.zeros_like(enc_angles))
+    enc_angles = torch.where(enc_angles < 24, enc_angles, torch.zeros_like(enc_angles))
+    dec_angles = dec_tight_boxes[:, 6].long() - 1
+    dec_angles = torch.where(dec_angles > 0, dec_angles, torch.zeros_like(dec_angles))
+    dec_angles = torch.where(dec_angles < 24, dec_angles, torch.zeros_like(dec_angles))
 
     attributes = None
-    dec_attributes = None
 
-    missing_nodes = data['decoder']['missing_nodes']
-    manipulated_nodes = data['decoder']['manipulated_nodes']
-
-    dec_objs_grained = data['decoder']['objs_grained']
-
-    return enc_objs, enc_triples, enc_tight_boxes, enc_angles, encoded_enc_f, encoded_enc_text_feat, encoded_enc_rel_feat, \
-           attributes, enc_objs_to_scene, dec_objs, dec_objs_grained, dec_triples, dec_tight_boxes, dec_angles, dec_sdfs, \
-           encoded_dec_f, encoded_dec_text_feat, encoded_dec_rel_feat, dec_attributes, dec_objs_to_scene, missing_nodes, \
-           manipulated_nodes
+    return enc_objs, enc_triples, enc_boxes, enc_angles, encoded_enc_f, encoded_enc_text_feat, encoded_enc_rel_feat, \
+           attributes, enc_objs_to_scene, dec_objs, dec_objs_grained, dec_triples, dec_boxes, dec_angles, dec_sdfs, \
+           encoded_dec_f, encoded_dec_text_feat, encoded_dec_rel_feat, attributes, dec_objs_to_scene, missing_nodes, manipulated_nodes
 
 def train():
     """ 제공된 인자를 기반으로 네트워크 학습
@@ -196,13 +225,12 @@ def train():
 
     if torch.cuda.is_available():
         model = model.cuda()
-        model.set_cuda()
 
     if args.loadmodel:
         model.load_networks(exp=args.exp, epoch=args.loadepoch, restart_optim=False)
 
     # SpaceAdaptive 현실 공간 로드 및 임베딩
-    # SpaceAdaptiveVAE 초기화
+    # SpaceAdaptiveVAE 초기화 (초기화된 model 인스턴스 전달)
     space_adaptive_vae = SpaceAdaptiveVAE(model)
     
     # 현실 공간 데이터 로드 및 임베딩
@@ -218,7 +246,9 @@ def train():
                 room_type=args.room_type,
                 space_id=args.real_space_id
             )
+            # print(space_data)
             print(f"현실 공간 데이터 처리 완료: {len(space_data) if space_data else 0}개 공간")
+            print(real_space_embedding)
 
     # 판별자 모델 설정
     if args.weight_D_box > 0:
@@ -245,7 +275,7 @@ def train():
         optimizer_bl.step()
 
     print("---- 모델 및 데이터셋 구축 완료 ----")
-
+    
     if not os.path.exists(args.exp + "/" + args.outf):
         os.makedirs(args.exp + "/" + args.outf)
 
@@ -268,7 +298,7 @@ def train():
             try:
                 enc_objs, enc_triples, enc_boxes, enc_angles, encoded_enc_f, encoded_enc_text_feat, encoded_enc_rel_feat,\
                 attributes, enc_objs_to_scene, dec_objs, dec_objs_grained, dec_triples, dec_boxes, dec_angles, dec_sdfs,\
-                encoded_dec_f, encoded_dec_text_feat, encoded_dec_rel_feat, dec_attributes, dec_objs_to_scene, missing_nodes,\
+                encoded_dec_f, encoded_dec_text_feat, encoded_dec_rel_feat, attributes, dec_objs_to_scene, missing_nodes,\
                 manipulated_nodes = parse_data(data)
             except Exception as e:
                 print("데이터 오류 발생:", e)
@@ -296,7 +326,7 @@ def train():
                     enc_objs, enc_triples, enc_boxes, enc_angles, encoded_enc_f,
                     encoded_enc_text_feat, encoded_enc_rel_feat, attributes, enc_objs_to_scene,
                     dec_objs, dec_objs_grained, dec_triples, dec_boxes, dec_angles, dec_sdfs,
-                    encoded_dec_f, encoded_dec_text_feat, encoded_dec_rel_feat, dec_attributes,
+                    encoded_dec_f, encoded_dec_text_feat, encoded_dec_rel_feat, attributes,
                     dec_objs_to_scene, missing_nodes, manipulated_nodes, real_space_id=real_space_id
                 )
             else:
@@ -304,7 +334,7 @@ def train():
                     enc_objs, enc_triples, enc_boxes, enc_angles, encoded_enc_f,
                     encoded_enc_text_feat, encoded_enc_rel_feat, attributes, enc_objs_to_scene,
                     dec_objs, dec_objs_grained, dec_triples, dec_boxes, dec_angles, dec_sdfs,
-                    encoded_dec_f, encoded_dec_text_feat, encoded_dec_rel_feat, dec_attributes,
+                    encoded_dec_f, encoded_dec_text_feat, encoded_dec_rel_feat, attributes,
                     dec_objs_to_scene, missing_nodes, manipulated_nodes
                 )
 

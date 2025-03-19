@@ -77,17 +77,7 @@ class VAE(nn.Module):
         self.counter = 0
 
     def set_cuda(self):
-        """
-        모델과 임베딩을 CUDA 장치로 이동시키는 메서드
-        """
-        if self.type_ == 'v2_full':
-            self.vae_v2.set_cuda()
-        elif self.type_ == 'v1_full':
-            if hasattr(self, 'vae') and self.vae is not None:
-                self.vae.set_cuda()
-        elif self.type_ == 'v1_box' or self.type_ == 'v2_box':
-            if hasattr(self, 'vae_box') and self.vae_box is not None:
-                self.vae_box.set_cuda()
+        self.vae_v2.set_cuda()
         
         # 현실 공간 임베딩이 있다면 CUDA로 이동
         if hasattr(self, 'real_space_embeddings') and self.real_space_embeddings is not None:
@@ -98,12 +88,10 @@ class VAE(nn.Module):
     def encode_real_space_tensors(self, objs_tensor, boxes_tensor, triples_tensor):
         """
         이미 처리된 텐서 데이터를 인코딩하여 임베딩 벡터 생성
-        
         Args:
             objs_tensor (torch.Tensor): 객체 클래스 텐서
             boxes_tensor (torch.Tensor): 바운딩 박스 텐서
             triples_tensor (torch.Tensor): 관계 텐서
-            
         Returns:
             torch.Tensor: 인코딩된 임베딩 벡터
         """
@@ -111,6 +99,9 @@ class VAE(nn.Module):
         objs_tensor = objs_tensor.cuda()
         boxes_tensor = boxes_tensor.cuda()
         triples_tensor = triples_tensor.cuda()
+
+        dummy_text_feats = torch.zeros((len(objs_tensor), 512)).cuda()
+        dummy_rel_feats = torch.zeros((len(triples_tensor), 512)).cuda()
         
         # 모델 타입에 따른 인코딩
         if self.type_ == 'v1_box' or self.type_ == 'v2_box':
@@ -122,12 +113,10 @@ class VAE(nn.Module):
         elif self.type_ == 'v2_full':
             # CLIP 특성이 필요한 경우 더미 데이터 생성
             if self.vae_v2.clip:
-                dummy_text_feats = torch.zeros((len(objs_tensor), 512)).cuda()
-                dummy_rel_feats = torch.zeros((len(triples_tensor), 512)).cuda()
                 mu, logvar = self.vae_v2.encoder(objs_tensor, triples_tensor, boxes_tensor, 
                                               None, dummy_text_feats, dummy_rel_feats)
             else:
-                mu, logvar = self.vae_v2.encoder(objs_tensor, triples_tensor, boxes_tensor, None)
+                mu, logvar = self.vae_v2.encoder(objs_tensor, triples_tensor, boxes_tensor, None, dummy_text_feats, dummy_rel_feats)
             embedding = mu
         return embedding
 
@@ -268,12 +257,9 @@ class VAE(nn.Module):
         
         elif self.type_ == 'v2_full':
             # 기존 forward 호출
-            mu, logvar, orig_gt_boxes, orig_gt_angles, orig_gt_shapes, orig_boxes, orig_angles, boxes, angles, obj_and_shape, keep = \
-                self.vae_v2.forward(enc_objs, enc_triples, enc_boxes, enc_text_feat=encoded_enc_text_feat, enc_rel_feat=encoded_enc_rel_feat, 
-                                   attributes=attributes, enc_objs_to_scene=enc_objs_to_scene, dec_objs=dec_objs, dec_objs_grained=dec_objs_grained,
-                                   dec_triples=dec_triples, dec=dec_boxes, dec_text_feat=encoded_dec_text_feat, dec_rel_feat=encoded_dec_rel_feat, 
-                                   dec_attributes=dec_attributes, dec_objs_to_scene=dec_objs_to_scene, missing_nodes=missing_nodes, 
-                                   manipulated_nodes=manipulated_nodes, dec_sdfs=dec_sdfs, enc_angles=enc_angles, dec_angles=dec_angles)
+            mu, logvar, orig_gt_boxes, orig_gt_angles, orig_gt_shapes, orig_boxes, orig_angles, boxes, angles, obj_and_shape, keep = self.vae_v2.forward(
+                enc_objs, enc_triples, enc_boxes, encoded_enc_text_feat, encoded_enc_rel_feat, attributes, enc_objs_to_scene, dec_objs, dec_objs_grained, dec_triples, dec_boxes,
+                encoded_dec_text_feat, encoded_dec_rel_feat, dec_attributes, dec_objs_to_scene, missing_nodes, manipulated_nodes, dec_sdfs, enc_angles, dec_angles)
             
             # 현실 공간 임베딩 적용
             if use_real_space_embedding:
