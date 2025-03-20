@@ -393,7 +393,7 @@ class Sg2ScVAEModel(nn.Module):
             orig_angles = []
             orig_gt_angles = []
         else:
-            dec_man_enc_pred = self.decoder(z, dec_objs, dec_triples, attributes)
+            dec_man_enc_pred = self.decoder(z, dec_objs, dec_triples, dec_text_feat, dec_rel_feat, attributes)
 
         orig_d3 = []
         orig_gt_d3 = []
@@ -428,7 +428,7 @@ class Sg2ScVAEModel(nn.Module):
         eps = torch.randn_like(std)
         z = eps.mul(std).add_(mu)
         keep = []
-        dec_man_enc_pred = self.decoder(z, objs, triples, attributes)
+        dec_man_enc_pred = self.decoder(z, objs, triples, dec_text_feat, dec_rel_feat, attributes)
         for i in range(len(dec_man_enc_pred)):
             keep.append(1)
         keep = torch.from_numpy(np.asarray(keep).reshape(-1, 1)).float().cuda()
@@ -449,7 +449,7 @@ class Sg2ScVAEModel(nn.Module):
                                                                                   1)).float().cuda())
             z_shape = torch.cat(z_shape, 0)
 
-            dc_shapes = self.decoder(z_shape, dec_objs, dec_triplets, attributes)
+            dc_shapes = self.decoder(z_shape, dec_objs, dec_triplets, dec_text_feat, dec_rel_feat, attributes)
             points = point_ae.forward_inference_from_latent_space(dc_shapes, point_ae.get_grid())
         return points, dc_shapes
 

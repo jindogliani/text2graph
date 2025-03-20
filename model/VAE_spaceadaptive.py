@@ -83,8 +83,7 @@ class VAE(nn.Module):
         if hasattr(self, 'real_space_embeddings') and self.real_space_embeddings is not None:
             self.real_space_embeddings = {k: v.cuda() for k, v in self.real_space_embeddings.items()}
 
-
-    # SpaceAdaptive: 텐서 데이터 인코딩
+    # SpaceAdaptive: 텐서 데이터 인코딩 (성공)
     def encode_real_space_tensors(self, objs_tensor, boxes_tensor, triples_tensor):
         """
         이미 처리된 텐서 데이터를 인코딩하여 임베딩 벡터 생성
@@ -99,36 +98,48 @@ class VAE(nn.Module):
         objs_tensor = objs_tensor.cuda()
         boxes_tensor = boxes_tensor.cuda()
         triples_tensor = triples_tensor.cuda()
+        
+        # 중요: 박스 텐서를 6개 파라미터(좌표/크기)와 각도 정보로 분리
+        boxes_coords = boxes_tensor[:, :6]  # 처음 6개 파라미터 (좌표/크기)
+        angles = None
+        if boxes_tensor.size(1) > 6:
+            angles = boxes_tensor[:, 6].long() - 1  # 7번째 파라미터 (각도)
+            # 각도 범위 보정 (0-23 사이로)
+            angles = torch.where(angles > 0, angles, torch.zeros_like(angles))
+            angles = torch.where(angles < 24, angles, torch.zeros_like(angles))
 
+        # CLIP 특성이 필요한 경우 더미 데이터 생성
         dummy_text_feats = torch.zeros((len(objs_tensor), 512)).cuda()
         dummy_rel_feats = torch.zeros((len(triples_tensor), 512)).cuda()
         
         # 모델 타입에 따른 인코딩
-        if self.type_ == 'v1_box' or self.type_ == 'v2_box':
-            mu, logvar = self.vae_box.encoder(objs_tensor, triples_tensor, boxes_tensor, None)
+        if self.type_ == 'v1_box':
+            mu, logvar = self.vae_box.encoder(objs_tensor, triples_tensor, boxes_coords, None)
+            embedding = mu  # 평균 벡터만 사용
+        elif self.type_ == 'v2_box':
+            mu, logvar = self.vae_box.encoder(objs_tensor, triples_tensor, boxes_coords, None, dummy_text_feats, dummy_rel_feats, angles)
             embedding = mu  # 평균 벡터만 사용
         elif self.type_ == 'v1_full':
-            mu, logvar = self.vae.encoder(objs_tensor, triples_tensor, boxes_tensor, None)
+            mu, logvar = self.vae.encoder(objs_tensor, triples_tensor, boxes_coords, None)
             embedding = mu
         elif self.type_ == 'v2_full':
             # CLIP 특성이 필요한 경우 더미 데이터 생성
             if self.vae_v2.clip:
-                mu, logvar = self.vae_v2.encoder(objs_tensor, triples_tensor, boxes_tensor, 
-                                              None, dummy_text_feats, dummy_rel_feats)
+                mu, logvar = self.vae_v2.encoder(objs_tensor, triples_tensor, boxes_coords, 
+                                              None, dummy_text_feats, dummy_rel_feats, angles)
             else:
-                mu, logvar = self.vae_v2.encoder(objs_tensor, triples_tensor, boxes_tensor, None, dummy_text_feats, dummy_rel_feats)
+                mu, logvar = self.vae_v2.encoder(objs_tensor, triples_tensor, boxes_coords, None, dummy_text_feats, dummy_rel_feats, angles)
             embedding = mu
         return embedding
 
+    # SpaceAdaptive
     def condition_with_real_space(self, real_space_embedding, z, alpha=None):
         """
         가상 공간 생성 시 현실 공간 임베딩으로 조건화하는 메서드
-        
         Args:
             real_space_embedding (torch.Tensor): 현실 공간 임베딩
             z (torch.Tensor): 가상 공간 잠재 벡터
             alpha (float, optional): 현실 공간과 가상 공간의 혼합 비율 (0~1). None이면 self.real_space_weight 사용
-        
         Returns:
             torch.Tensor: 조건화된 잠재 벡터
         """
@@ -140,16 +151,15 @@ class VAE(nn.Module):
         
         return conditioned_z
     
-    def real_space_loss(self, z, real_space_embedding, boxes_pred, real_space_boxes_pred):
+    # SpaceAdaptive: 현실 공간 손실 계산
+    def calculate_real_space_loss(self, z, real_space_embedding, boxes_pred, real_space_boxes_pred):
         """
         현실 공간 임베딩과 생성된 잠재 벡터 간의 손실을 계산하는 메서드
-        
         Args:
             z (torch.Tensor): 생성된 잠재 벡터
             real_space_embedding (torch.Tensor): 현실 공간 임베딩
             boxes_pred (torch.Tensor): 생성된 바운딩 박스
             real_space_boxes_pred (torch.Tensor): 현실 공간 바운딩 박스
-            
         Returns:
             torch.Tensor: 계산된 손실값
         """
@@ -168,10 +178,10 @@ class VAE(nn.Module):
         
         return weighted_loss
     
+    # SpaceAdaptive: 바운딩 박스 겹침 손실 계산
     def calculate_box_overlap_loss(self, boxes1, boxes2):
         """
         두 바운딩 박스 세트 간의 겹침을 계산하는 메서드
-        
         Args:
             boxes1 (torch.Tensor): 첫 번째 바운딩 박스 세트 [N, 6] (x, y, z, dx, dy, dz)
             boxes2 (torch.Tensor): 두 번째 바운딩 박스 세트 [M, 6] (x, y, z, dx, dy, dz)
@@ -524,7 +534,7 @@ class VAE(nn.Module):
         elif self.type_ == 'v2_full':
             return self.vae_v2.decoder(z, dec_objs, dec_triplets, attributes, encoded_dec_text_feat, encoded_dec_rel_feat)[0]
     
-    # SpaceAdaptive Model
+    # SpaceAdaptive
     def decoder_with_changes_boxes_and_shape_real(self, real_space_embedding, objs, triples, encoded_dec_text_feat, encoded_dec_rel_feat, dec_sdfs, attributes, missing_nodes, manipulated_nodes, gen_shape=False, real_space_weight=0.3):
         """
         현실 공간 임베딩을 활용한 디코딩

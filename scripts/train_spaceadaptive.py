@@ -78,7 +78,8 @@ parser.add_argument('--use_space_adaptive', default=True, type=bool_flag, help='
 parser.add_argument('--hybrid_scene_output', default='../spaceadaptive/hybrid_scene.json', type=str, help='생성된 하이브리드 씬 저장 경로')
 parser.add_argument('--top_k_scenes', default=50, type=int, help='선택할 상위 유사 씬 개수')
 
-# python train_spaceadaptive.py --room_type all --dataset /mnt/dataset/FRONT --residual True --network_type v2_box --with_SDF True --with_CLIP True --batchSize 8 --workers 8 --nepoch 2051 --large True
+# python train_spaceadaptive.py --room_type all --dataset /mnt/dataset/FRONT --residual True --network_type v2_box --with_SDF False --with_CLIP False --batchSize 8 --workers 8 --nepoch 2051 --large True
+# python train_spaceadaptive.py --room_type all --dataset /mnt/dataset/FRONT --residual True --network_type v2_full --with_SDF True --with_CLIP False --batchSize 8 --workers 8 --nepoch 2051 --large True
 # python train_spaceadaptive.py --room_type all --dataset /mnt/dataset/FRONT --residual True --network_type v2_full --with_SDF True --with_CLIP False --batchSize 8 --workers 8 --nepoch 2051 --large True
 
 args = parser.parse_args()
@@ -96,16 +97,6 @@ def parse_data(data):
         encoded_enc_f = data['encoder']['feats'] #사전 인코딩된 latent point features를 가져옴.
         encoded_enc_f = encoded_enc_f.cuda() #텐서를 GPU로 이동
 
-    encoded_enc_text_feat = None
-    encoded_enc_rel_feat = None
-    encoded_dec_text_feat = None
-    encoded_dec_rel_feat = None
-    if args.with_CLIP:
-        encoded_enc_text_feat = data['encoder']['text_feats'].cuda() #텐서를 GPU로 이동
-        encoded_enc_rel_feat = data['encoder']['rel_feats'].cuda()
-        encoded_dec_text_feat = data['decoder']['text_feats'].cuda()
-        encoded_dec_rel_feat = data['decoder']['rel_feats'].cuda()
-
     dec_objs, dec_triples, dec_tight_boxes, dec_objs_to_scene, dec_triples_to_scene = data['decoder']['objs'], \
                                                                                       data['decoder']['tripltes'], \
                                                                                       data['decoder']['boxes'], \
@@ -118,6 +109,24 @@ def parse_data(data):
     if 'feats' in data['decoder']:
         encoded_dec_f = data['decoder']['feats']
         encoded_dec_f = encoded_dec_f.cuda()
+    
+    encoded_enc_text_feat = None
+    encoded_enc_rel_feat = None
+    encoded_dec_text_feat = None
+    encoded_dec_rel_feat = None
+    if args.with_CLIP:
+        encoded_enc_text_feat = data['encoder']['text_feats'].cuda() #텐서를 GPU로 이동
+        encoded_enc_rel_feat = data['encoder']['rel_feats'].cuda()
+        encoded_dec_text_feat = data['decoder']['text_feats'].cuda()
+        encoded_dec_rel_feat = data['decoder']['rel_feats'].cuda()
+    else:
+        # V2_BOX/V2_FULL 모델용 더미 텐서 생성
+        if args.network_type in ['v2_box', 'v2_full']:
+            # 객체 수에 맞는 더미 텐서 생성
+            encoded_enc_text_feat = torch.zeros((len(enc_objs), 512)).cuda()
+            encoded_enc_rel_feat = torch.zeros((len(enc_triples), 512)).cuda()
+            encoded_dec_text_feat = torch.zeros((len(dec_objs), 512)).cuda()
+            encoded_dec_rel_feat = torch.zeros((len(dec_triples), 512)).cuda()
 
     # changed nodes
     missing_nodes = data['missing_nodes']
@@ -338,81 +347,140 @@ def train():
                     dec_objs_to_scene, missing_nodes, manipulated_nodes
                 )
 
-            # 모델 출력 파싱
-            if args.network_type == 'v2_full':
-                z_obj_vecs, z_rel_vecs, z_obj_vecs_enc, z_obj_sigmas, z_rel_vecs_enc, z_rel_sigmas, \
-                z_diff, boxes_pred, diff_loss, feat_shape, mu_shape, logvar_shape, z_samples, box_data, \
-                codes_pred, diff_out = model_out
-            else:
-                z_obj_vecs, z_rel_vecs, z_obj_vecs_enc, z_obj_sigmas, z_rel_vecs_enc, z_rel_sigmas, \
-                z_diff, boxes_pred, diff_loss, feat_shape, mu_shape, logvar_shape, z_samples, box_data, \
-                codes_pred = model_out
+            mu_box, logvar_box, mu_shape, logvar_shape, orig_gt_box, orig_gt_angle, orig_gt_shape, orig_box, orig_angle, orig_shape, \
+            dec_man_enc_box_pred, dec_man_enc_angle_pred, obj_and_shape, keep = model_out
 
-            # 손실 계산
-            total_kl_loss, mask_ratio, triplet_ratio, \
-            z_obj_kl_loss, z_rel_kl_loss, z_shape_kl_loss = calculate_model_losses(
-                z_obj_vecs, z_rel_vecs, z_obj_vecs_enc, z_obj_sigmas, z_rel_vecs_enc, z_rel_sigmas,
-                mu_shape, logvar_shape, enc_objs_to_scene, dec_objs_to_scene)
+            vae_loss_box, vae_losses_box = calculate_model_losses(args,
+                                                                  orig_gt_box,
+                                                                  orig_box,
+                                                                  name='box', withangles=args.with_angles,
+                                                                  angles_pred=orig_angle,
+                                                                  mu=mu_box, logvar=logvar_box, angles=orig_gt_angle,
+                                                                  KL_weight=0.1, writer=writer, counter=counter)
+
+            if args.network_type == 'v2_full':
+                vae_loss_shape, vae_losses_shape = 0, 0
+                new_shape_loss, new_shape_losses = model.vae_v2.Diff.loss_df, model.vae_v2.Diff.loss_dict
+                model.vae_v2.Diff.update_loss()
+            else:
+                # set shape loss to 0 if we are only predicting layout
+                vae_loss_shape, vae_losses_shape = 0, 0
+
+            if args.with_changes:
+                oriented_gt_boxes = torch.cat([dec_boxes], dim=1)
+                boxes_pred_in = keep * oriented_gt_boxes + (1 - keep) * dec_man_enc_box_pred
+
+                if args.weight_D_box == 0:
+                    # Generator loss
+                    boxGloss = 0
+                    # Discriminator loss
+                    gamma = 0.1
+                    boxDloss_real = 0
+                    boxDloss_fake = 0
+                    reg_loss = 0
+                else:
+                    logits, _ = boxD(dec_objs, dec_triples, boxes_pred_in, keep)
+                    logits_fake, reg_fake = boxD(dec_objs, dec_triples, boxes_pred_in.detach(), keep, with_grad=True,
+                                                 is_real=False)
+                    logits_real, reg_real = boxD(dec_objs, dec_triples, oriented_gt_boxes, with_grad=True, is_real=True)
+                    # Generator loss
+                    boxGloss = bce_loss(logits, torch.ones_like(logits))
+                    # Discriminator loss
+                    gamma = 0.1
+                    boxDloss_real = bce_loss(logits_real, torch.ones_like(logits_real))
+                    boxDloss_fake = bce_loss(logits_fake, torch.zeros_like(logits_fake))
+                    # Regularization by gradient penalty
+                    reg_loss = torch.mean(reg_real + reg_fake)
+
+                # gradient penalty
+                boxDloss = boxDloss_fake + boxDloss_real + (gamma / 2.0) * reg_loss
+                optimizerDbox.zero_grad()
+                boxDloss.backward()
 
             # 현실 공간 손실 계산 (현실 공간 임베딩을 사용한 경우)
-            real_space_loss = 0.0
+            # TODO 검수 필요
+            vae_loss_realspace = 0.0
             if use_real_space_this_batch and real_space_embedding is not None:
                 # 생성된 잠재 벡터와 현실 공간 임베딩 간의 손실 계산
                 real_space_boxes_pred = None  # 실제 현실 공간의 바운딩 박스 (있다면)
-                real_space_loss = model.real_space_loss(z_diff, real_space_embedding, boxes_pred, real_space_boxes_pred)
-                writer.add_scalar('Train/real_space_loss', real_space_loss.item(), counter)
+                vae_loss_realspace = model.calculate_real_space_loss(z_diff, real_space_embedding, boxes_pred, real_space_boxes_pred)
 
-            # 모델별 최적화 진행
+            loss = vae_loss_box + vae_loss_shape + 0.1 * loss_genShape + 100 * new_shape_loss
+            if args.with_changes:
+                loss += args.weight_D_box * boxGloss  # + b_loss
+            # 현실 공간 손실 추가 (사용하는 경우)
+            if use_real_space_this_batch and vae_loss_realspace > 0:
+                loss += args.real_space_loss_weight * vae_loss_realspace
+
+            # optimize
+            loss.backward(retain_graph=True)
+
+            # Cap the occasional super mutant gradient spikes
+            # Do now a gradient step and plot the losses
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+
             if args.network_type == 'v2_full':
-                G_loss, D_loss, losses = model.vae_v2.optimize_params(
-                    total_kl_loss, diff_loss, feat_shape, real_space_loss if use_real_space_this_batch else None,
-                    args.real_space_loss_weight if use_real_space_this_batch else 0.0,
-                    diff_out=diff_out, z=z_samples, loss_debug=False)
-                
-                writer.add_scalar('Train/KL_loss', total_kl_loss.item(), counter)
-                writer.add_scalar('Train/diff_loss', diff_loss.item(), counter)
-                writer.add_scalar('Train/G_loss', G_loss.item(), counter)
-                writer.add_scalar('Train/D_loss', D_loss.item(), counter)
-                
-                # 추가 손실 기록
-                for k, v in losses.items():
-                    writer.add_scalar('Train/{}'.format(k), v, counter)
+                torch.nn.utils.clip_grad_norm_(model.vae_v2.Diff.df_module.parameters(), 5.0)
+                for group in model.vae_v2.optimizerFULL.param_groups:
+                    for p in group['params']:
+                        if p.grad is not None and p.requires_grad and torch.isnan(p.grad).any():
+                            print('NaN grad in step {}.'.format(counter))
+                            p.grad[torch.isnan(p.grad)] = 0
             else:
-                # v1_box, v2_box, v1_full 모델용 최적화
-                optimizer_bl.zero_grad()
-                
-                # 기본 손실
-                loss = total_kl_loss + diff_loss
-                
-                # 현실 공간 손실 추가 (사용하는 경우)
-                if use_real_space_this_batch and real_space_loss > 0:
-                    loss += args.real_space_loss_weight * real_space_loss
-                
-                loss.backward()
+                for group in optimizer_bl.param_groups:
+                    for p in group['params']:
+                        if p.grad is not None and p.requires_grad and torch.isnan(p.grad).any():
+                            print('NaN grad in step {}.'.format(counter))
+                            p.grad[torch.isnan(p.grad)] = 0
+
+            if args.with_changes:
+                if args.network_type == 'v1_full':
+                    optimizerShapeAux.step()
+                optimizerDbox.step()
+
+            if args.network_type == 'v2_full':
+                model.vae_v2.optimizerFULL.step()
+            else:
                 optimizer_bl.step()
-                
-                writer.add_scalar('Train/total_loss', loss.item(), counter)
-                writer.add_scalar('Train/KL_loss', total_kl_loss.item(), counter)
-                writer.add_scalar('Train/diff_loss', diff_loss.item(), counter)
-                if use_real_space_this_batch:
-                    writer.add_scalar('Train/real_space_loss', real_space_loss.item(), counter)
 
             # 로깅 및 모델 저장
             iter_net_time = time.time()
             eta = ((iter_net_time - iter_start_time) / (i + 1)) * len(dataloader) - (
                     iter_net_time - iter_start_time)
-            
-            if i % 25 == 0:
-                print('[{}/{}][{}/{}] KL: {:.4f}, Diff: {:.4f}, REAL: {:.4f}, Mask: {:.2f}, triple: {:.2f}, ETA: {:.2f}h'.format(
-                    epoch, args.nepoch, i, len(dataloader),
-                    total_kl_loss.item(), diff_loss.item(), 
-                    real_space_loss.item() if use_real_space_this_batch else 0.0,
-                    mask_ratio, triplet_ratio, eta / 3600.0))
 
             counter += 1
+            if counter % 100 == 0:
+                message = "loss at {}, (ETA: {:.2f}h): box {:.4f}\trealspace {:.4f}\tshape {:.4f}\tdiscr RealFake {:.4f}\t discr Classifcation {:.4f}\t".format(
+                    counter, eta, vae_loss_box, vae_loss_realspace, vae_loss_shape, loss_genShapeFake,
+                    loss_shape_fake_g)
+                if args.network_type == 'v2_full':
+                    loss_diff = model.vae_v2.Diff.get_current_errors()
+                    for k, v in loss_diff.items():
+                        message += '%s: %.6f ' % (k, v)
+                print(message)
+
+            writer.add_scalar('Train_Loss_BBox', vae_loss_box, counter)
+            writer.add_scalar('Train_Loss_RealSpace', vae_loss_realspace, counter)
+            writer.add_scalar('Train_Loss_Shape', vae_loss_shape, counter)
+            writer.add_scalar('Train_Loss_loss_genShapeFake', loss_genShapeFake, counter)
+            writer.add_scalar('Train_Loss_loss_shape_fake_g', loss_shape_fake_g, counter)
+
+            if args.network_type == 'v2_full':
+                t = (time.time() - iter_start_time) / args.batchSize
+                loss_diff = model.vae_v2.Diff.get_current_errors()
+                model.vae_v2.visualizer.print_current_errors(writer, counter, loss_diff, t)
+                if counter % 1000 == 0:
+                    # DDIM 샘플링은 Diffusion 모델에서 생성 과정을 가속화하는 샘플링 기법
+                    model.vae_v2.Diff.gen_shape_after_foward(num_obj=args.vis_num)
+                    model.vae_v2.visualizer.display_current_results(writer, model.vae_v2.Diff.get_current_visuals(
+                        dataset.classes_r, obj_and_shape[0].detach().cpu().numpy(), num_obj=args.vis_num),
+                                                                    counter, phase='train')
+
+                current_lr = model.vae_v2.update_learning_rate()
+                writer.add_scalar("learning_rate", current_lr, counter)
 
         # 에폭 완료 후 모델 저장
-        if epoch % args.snapshot == 0: # TODO 아직 스냅샷 args 정해지지 않음.
+        if epoch % args.snapshot == 0:
             model.save(args.exp, args.outf, epoch, counter)
         
         # 학습 종료 후 SpaceAdaptiveVAE 처리
@@ -470,6 +538,7 @@ def train():
                 print(f"최신 하이브리드 씬 복사: {latest_hybrid_scene_path}")
 
     print('Training completed!')
+    writer.close()
 
 if __name__ == '__main__':
     train() 

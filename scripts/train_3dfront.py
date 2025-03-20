@@ -90,7 +90,7 @@ print(args)
 # --batchSize 8 --workers 8 --loadmodel False --nepoch 10000 --large False
 
 # CLIP 없이도 가능한지 테스트용
-# python train_3dfront.py --room_type livingroom --dataset /mnt/dataset/FRONT --residual True --network_type v2_full --with_SDF True --with_CLIP False --batchSize 8 --workers 8 --exp ../experiments/test
+# python train_3dfront.py --room_type livingroom --residual True --network_type v2_box --with_SDF False --with_CLIP False --batchSize 8 --workers 8 --exp ../experiments/test
 
 def parse_data(data):
     enc_objs, enc_triples, enc_tight_boxes, enc_objs_to_scene, enc_triples_to_scene = data['encoder']['objs'], \
@@ -104,16 +104,6 @@ def parse_data(data):
         encoded_enc_f = data['encoder']['feats'] #사전 인코딩된 latent point features를 가져옴.
         encoded_enc_f = encoded_enc_f.cuda() #텐서를 GPU로 이동
 
-    encoded_enc_text_feat = None
-    encoded_enc_rel_feat = None
-    encoded_dec_text_feat = None
-    encoded_dec_rel_feat = None
-    if args.with_CLIP:
-        encoded_enc_text_feat = data['encoder']['text_feats'].cuda() #텐서를 GPU로 이동
-        encoded_enc_rel_feat = data['encoder']['rel_feats'].cuda()
-        encoded_dec_text_feat = data['decoder']['text_feats'].cuda()
-        encoded_dec_rel_feat = data['decoder']['rel_feats'].cuda()
-
     dec_objs, dec_triples, dec_tight_boxes, dec_objs_to_scene, dec_triples_to_scene = data['decoder']['objs'], \
                                                                                       data['decoder']['tripltes'], \
                                                                                       data['decoder']['boxes'], \
@@ -126,6 +116,24 @@ def parse_data(data):
     if 'feats' in data['decoder']:
         encoded_dec_f = data['decoder']['feats']
         encoded_dec_f = encoded_dec_f.cuda()
+
+    encoded_enc_text_feat = None
+    encoded_enc_rel_feat = None
+    encoded_dec_text_feat = None
+    encoded_dec_rel_feat = None
+    if args.with_CLIP:
+        encoded_enc_text_feat = data['encoder']['text_feats'].cuda() #텐서를 GPU로 이동
+        encoded_enc_rel_feat = data['encoder']['rel_feats'].cuda()
+        encoded_dec_text_feat = data['decoder']['text_feats'].cuda()
+        encoded_dec_rel_feat = data['decoder']['rel_feats'].cuda()
+    else:
+        # V2_BOX/V2_FULL 모델용 더미 텐서 생성
+        if args.network_type in ['v2_box', 'v2_full']:
+            # 객체 수에 맞는 더미 텐서 생성
+            encoded_enc_text_feat = torch.zeros((len(enc_objs), 512)).cuda()
+            encoded_enc_rel_feat = torch.zeros((len(enc_triples), 512)).cuda()
+            encoded_dec_text_feat = torch.zeros((len(dec_objs), 512)).cuda()
+            encoded_dec_rel_feat = torch.zeros((len(dec_triples), 512)).cuda()
 
     # changed nodes
     missing_nodes = data['missing_nodes']
