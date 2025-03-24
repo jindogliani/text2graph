@@ -167,14 +167,12 @@ class VAE(nn.Module):
         return conditioned_z
     
     # SpaceAdaptive: 현실 공간 손실 계산
-    def calculate_real_space_loss(self, z, real_space_embedding, boxes_pred, real_space_boxes_pred):
+    def calculate_real_space_loss(self, z, real_space_embedding):
         """
         현실 공간 임베딩과 생성된 잠재 벡터 간의 손실을 계산하는 메서드
         Args:
             z (torch.Tensor): 생성된 잠재 벡터
             real_space_embedding (torch.Tensor): 현실 공간 임베딩
-            boxes_pred (torch.Tensor): 생성된 바운딩 박스
-            real_space_boxes_pred (torch.Tensor): 현실 공간 바운딩 박스
         Returns:
             torch.Tensor: 계산된 손실값
         """

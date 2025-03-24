@@ -512,7 +512,11 @@ def train():
                         for k, v in loss_diff.items():
                             message += '%s: %.6f ' % (k, v)
                     print(message)
-
+                    print(len(space_adaptive_vae.space_data[real_space_id]["candidates_during_training"]))
+                    for i in range(len(space_adaptive_vae.space_data[real_space_id]["candidates_during_training"])):
+                        print(len(space_adaptive_vae.space_data[real_space_id]["candidates_during_training"][i]), end=" ")
+                    print()
+                    
                 writer.add_scalar('Train_Loss_BBox', vae_loss_box, counter)
                 writer.add_scalar('Train_Loss_RealSpace', vae_loss_realspace, counter)
                 writer.add_scalar('Train_Loss_Shape', vae_loss_shape, counter)
