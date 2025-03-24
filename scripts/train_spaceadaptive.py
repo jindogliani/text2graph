@@ -77,7 +77,7 @@ parser.add_argument('--snapshot', default=20, type=int, help='모델 저장 주�
 parser.add_argument('--training_done', default=False, type=bool_flag, help='학습 단계 건너뛰기 여부')
 parser.add_argument('--use_space_adaptive', default=True, type=bool_flag, help='SpaceAdaptiveVAE 사용 여부')
 parser.add_argument('--hybrid_scene_output', default='../spaceadaptive/hybrid_scene.json', type=str, help='생성된 하이브리드 씬 저장 경로')
-parser.add_argument('--top_k_scenes', default=100, type=int, help='선택할 상위 유사 씬 개수')
+parser.add_argument('--top_k_scenes', default=200, type=int, help='선택할 상위 유사 씬 개수')
 
 # python train_spaceadaptive.py --room_type all --dataset /mnt/dataset/FRONT --residual True --network_type v2_box --with_SDF False --with_CLIP False --batchSize 8 --workers 8 --nepoch 1000 --large True --training_done True --loadmodel True --loadepoch 360
 
@@ -87,9 +87,8 @@ parser.add_argument('--top_k_scenes', default=100, type=int, help='선택할 상
 # python train_spaceadaptive.py --exp ../experiments/space_adaptive --network_type v2_box --training_done True --loadmodel True --loadepoch 360
 # no_adaptive 3/23 학습
 # python train_spaceadaptive.py --training_done False --exp ../experiments/no_adaptive --network_type v2_box --use_real_space False
-
-# Studio 3/24 학습
-# python train_spaceadaptive.py --training_done False --exp ../experiments/space_adaptive_studio --network_type v2_box --use_real_space True
+# full_space_adaptive 3/24 학습
+# python train_spaceadaptive.py --training_done False --exp ../experiments/space_adaptive_full --network_type v2_box --use_real_space True --real_space_condition_freq 1.0
 
 args = parser.parse_args()
 print(args)
@@ -323,7 +322,17 @@ def train():
                 except Exception as e:
                     print("데이터 오류 발생:", e)
                     continue
-
+                # if i == 1:
+                #     print("enc_objs 텐서 전체:", enc_objs)
+                #     print("enc_objs 텐서 모양(shape):", enc_objs.shape)
+                #     print("enc_objs 텐서 길이(첫 번째 차원):", len(enc_objs))
+                #     print("enc_boxes 텐서 모양:", enc_boxes.shape)
+                #     print("enc_boxes 텐서 길이(첫 번째 차원):", len(enc_boxes))
+                #     print("enc_angles 텐서 모양:", enc_angles.shape)
+                #     print("enc_angles 텐서 길이(첫 번째 차원):", len(enc_angles))
+                #     print("enc_triples 텐서 모양:", enc_triples.shape)
+                #     print("enc_triples 텐서 길이(첫 번째 차원):", len(enc_triples))
+                
                 # SpaceAdaptive 현실 공간 조건화 처리
                 # 현실 공간 임베딩 랜덤 선택 (조건화에 사용)
                 real_space_id = None
@@ -435,7 +444,7 @@ def train():
                     orig_box_clone = None
                     if orig_box is not None:
                         orig_box_clone = orig_box.clone() if isinstance(orig_box, torch.Tensor) else orig_box
-                    vae_loss_realspace = model.calculate_real_space_loss(mu_box_clone, real_space_emb_clone, orig_box_clone, boxes_clone)
+                    vae_loss_realspace = space_adaptive_vae.calculate_real_space_loss_v2(mu_box_clone, real_space_emb_clone)
 
                 # 기본 손실 계산
                 loss = vae_loss_box + vae_loss_shape + 0.1 * loss_genShape + 100 * new_shape_loss
@@ -559,13 +568,12 @@ def train():
             print(f"현실 공간과 가장 유사한 {len(similar_scenes)}개 가상 씬 식별 완료")
             
             # 6. 하이브리드 씬 생성
-            # TODO 수정 필요
             print("하이브리드 씬 생성 중...")
-            hybrid_scene = space_adaptive_vae.generate_hybrid_scene_from_similar()
+            hybrid_scene = space_adaptive_vae.generate_hybrid_scene_from_similar_v2(space_data=space_data, similar_scenes=similar_scenes, space_id=args.real_space_id, real_space_embedding=real_space_embedding)
             print("하이브리드 씬 생성 완료")
             
             # 7. 생성된 하이브리드 씬 저장
-            hybrid_scene_path = os.path.join(args.exp, f'hybrid_scene_epoch_{epoch}.json')
+            hybrid_scene_path = os.path.join(args.exp, f'hybrid_scene_epoch_{args.loadepoch}_{args.real_space_id}.json')
             space_adaptive_vae.save_hybrid_scene(hybrid_scene_path)
             print(f"하이브리드 씬 저장 완료: {hybrid_scene_path}")
             
@@ -583,7 +591,6 @@ def train():
                 shutil.copy2(hybrid_scene_path, latest_hybrid_scene_path)
                 print(f"최신 하이브리드 씬 복사: {latest_hybrid_scene_path}")
 
-    print('Training completed!')
     writer.close()
 
 if __name__ == '__main__':

@@ -181,7 +181,7 @@ def evaluate():
     model = VAE(root=args.dataset, type=modeltype_, diff_opt=diff_opt, vocab=test_dataset_no_changes.vocab, replace_latent=replacelatent_,
                 with_changes=with_changes_, residual=modelArgs['residual'], gconv_pooling=modelArgs['pooling'], clip=modelArgs['with_CLIP'],
                 with_angles=modelArgs['with_angles'], deepsdf=modelArgs['with_feats'], with_E2=with_E2,
-                use_real_space=use_real_space, real_space_weight=real_space_weight)
+                use_real_space=use_real_space, real_space_weight=real_space_weight, space_adaptive_vae=None)
     
     if modeltype_ == 'v2_full':
         model.vae_v2.optimizer_ini()

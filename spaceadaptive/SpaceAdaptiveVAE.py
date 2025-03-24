@@ -11,7 +11,7 @@ sys.path.append('../')
 try:
     from model.VAE_spaceadaptive import VAE
 except ImportError:
-    print("VAE 모듈을 불러올 수 없습니다. 테스트 모드로 실행합니다.")
+    print("VAE 모듈을 불러올 수 없습니다!! 테스트 모드로 실행합니다.")
     VAE = None
 from model.losses import bce_loss
 from helpers.util import bool_flag, _CustomDataParallel
@@ -387,7 +387,7 @@ class SpaceAdaptiveVAE:
         
         return similarity.item()
     
-    def identify_similar_virtual_scenes(self, virtual_scenes_dataset, top_k=50): # 검수완료
+    def identify_similar_virtual_scenes(self, virtual_scenes_dataset, top_k=200): # 검수완료
         """
         현실 공간과 유사한 가상 씬들을 식별
         Args:
@@ -415,14 +415,15 @@ class SpaceAdaptiveVAE:
             else:
                 similarity = self.calculate_embedding_similarity(scene_embedding, self.real_space_embedding[self.space_id])
                 
-            similar_scenes.append((scene_id, scene_data, similarity))
+            similar_scenes.append((scene_id, scene_data, scene_embedding, similarity))
         
         # 유사도 기준 정렬 및 상위 k개 반환
-        similar_scenes.sort(key=lambda x: x[2], reverse=True)
+        similar_scenes.sort(key=lambda x: x[3], reverse=True) # 유사도 기준 정렬 맞지..?
         self.similar_scenes = similar_scenes[:top_k]
         
         return self.similar_scenes
     
+    # Not in Use.
     def analyze_space_regions(self, space_id, space_data): # 검수완료
         """
         공간을 의미 있는 영역으로 분할
@@ -502,6 +503,7 @@ class SpaceAdaptiveVAE:
         
         return regions
     
+    # Not in Use.
     def split_scene_into_fragments(self, scene_id, scene_data): # 검수 완료
         """
         가상 씬을 작은 조각으로 분할
@@ -521,6 +523,7 @@ class SpaceAdaptiveVAE:
         
         return fragments
     
+    # Not in Use.
     def find_best_matching_fragment(self, target_region, similar_scenes): # 검수 완료
         """
         대상 영역과 가장 잘 맞는 가상 씬 조각 탐색
@@ -552,7 +555,8 @@ class SpaceAdaptiveVAE:
         
         return best_fragment
     
-    def integrate_fragment(self, hybrid_scene, fragment, target_region): # TODO 검수필요
+    # Not in Use.
+    def integrate_fragment(self, hybrid_scene, fragment, target_region):
         """
         가상 씬 조각을 하이브리드 씬에 통합
         Args:
@@ -632,6 +636,7 @@ class SpaceAdaptiveVAE:
         
         return hybrid_scene
         
+    # Not in Use.
     def generate_hybrid_scene_from_similar(self, space_data=None, similar_scenes=None): 
         """
         식별된 유사 가상 씬들을 조합하여 하이브리드 씬 생성
@@ -667,11 +672,161 @@ class SpaceAdaptiveVAE:
                 hybrid_scene = self.integrate_fragment(hybrid_scene, best_fragment, region_data)
         
         # 4. 씬 일관성 확보
-        hybrid_scene = self.ensure_scene_consistency(hybrid_scene)
+        # hybrid_scene = self.ensure_scene_consistency(hybrid_scene)
         self.hybrid_scene = hybrid_scene
         
         return hybrid_scene
     
+    # SpaceAdaptive: 현실 공간 손실 계산
+    def calculate_real_space_loss_v2(self, z, real_space_embedding=None):
+        """
+        현실 공간 임베딩과 생성된 잠재 벡터 간의 손실을 계산하는 메서드
+        Args:
+            z (torch.Tensor): 생성된 잠재 벡터
+            real_space_embedding (torch.Tensor): 현실 공간 임베딩
+        Returns:
+            torch.Tensor: 계산된 손실값
+        """
+        if real_space_embedding is None:
+            real_space_embedding = self.real_space_embedding[self.space_id]
+
+        # 모든 텐서의 복사본 생성 및 그래디언트 분리
+        z_detached = z.detach().clone() if isinstance(z, torch.Tensor) else z
+        real_space_emb_detached = real_space_embedding.detach().clone() if isinstance(real_space_embedding, torch.Tensor) else real_space_embedding
+        
+        # candidates_during_training 초기화 확인 및 생성
+        if self.space_id not in self.space_data or "candidates_during_training" not in self.space_data[self.space_id]:
+            # 현실 객체 수만큼 빈 리스트 생성
+            num_real_objects = len(real_space_embedding)
+            self.space_data[self.space_id]["candidates_during_training"] = [[] for _ in range(num_real_objects)]
+
+        # 중간 계산은 그래디언트 추적 없이 수행
+        with torch.no_grad():
+            for i, real_obj_emd in enumerate(real_space_emb_detached):
+                similarities = F.cosine_similarity(real_obj_emd.unsqueeze(0), z_detached, dim=1)
+                matched_idx = similarities.argmax().item()
+                similarity_value = similarities[matched_idx].item()
+
+                candidate = {
+                "emd": z_detached[matched_idx].clone(),  # 임베딩 저장
+                "similarity": similarity_value,  # 유사도 저장
+                }
+
+                self.space_data[self.space_id]["candidates_during_training"][i].append(candidate)
+                # 유사도 기준 내림차순 정렬
+                self.space_data[self.space_id]["candidates_during_training"][i].sort(key=lambda x: x["similarity"], reverse=True)
+            
+                # 리스트 크기 제한 (최대 20개)
+                max_candidates = 20
+                if len(self.space_data[self.space_id]["candidates_during_training"][i]) > max_candidates:
+                    self.space_data[self.space_id]["candidates_during_training"][i] = \
+                        self.space_data[self.space_id]["candidates_during_training"][i][:max_candidates]
+            
+            cumulative_z = []
+            for i, candidates in enumerate(self.space_data[self.space_id]["candidates_during_training"]):
+                cumulative_z.append(candidates[0]["emd"])
+            
+            cumulative_z_tensor = torch.stack(cumulative_z)
+
+            # MSE 손실 계산
+            latent_loss = F.mse_loss(cumulative_z_tensor, real_space_emb_detached, reduction='mean')
+            
+            return latent_loss
+    
+    def generate_hybrid_scene_from_similar_v2(self, space_data=None, similar_scenes=None, space_id=None, real_space_embedding=None):
+        """개선된 하이브리드 씬 생성 함수 - 객체 단위 접근"""
+        if similar_scenes is None:
+            similar_scenes = self.similar_scenes
+        if space_data is None:
+            space_data = self.space_data
+        if space_id is None:
+            space_id = self.space_id
+        if real_space_embedding is None:
+            real_space_embedding = self.real_space_embedding
+            real_space_embed = real_space_embedding[space_id]
+        
+        # 1. 현실 공간의 각 객체마다 유사 객체 후보 탐색
+        real_objects = []
+        for i, obj_class in enumerate(space_data[space_id]["objs"]):
+            # scene이나 floor 객체는 제외 (ID: 0, 35)
+            # if obj_class.item() in [0, 35]:
+            #     continue
+                
+            real_objects.append({
+                "id": i,
+                "class": obj_class.item(),
+                "box": space_data[space_id]["boxes"][i],
+                "embedding": real_space_embed[i],  # 객체별 임베딩
+                "similar_candidates": []  # 유사 가상 객체 후보 리스트
+            })
+        
+        # 2. 각 객체별로 유사 후보 탐색 
+        for real_obj in real_objects:
+            for scene_id, scene_data, scene_embedding, _ in similar_scenes:
+                for j, virtual_obj_class in enumerate(scene_data["objs"]):
+                    # 동일한 클래스의 객체만 고려
+                    if virtual_obj_class.item() == real_obj["class"]:
+                        # 임베딩 유사도 계산
+                        similarity = self.calculate_embedding_similarity(
+                        scene_embedding[j].unsqueeze(0),  # 단일 객체 임베딩으로 변환
+                        real_obj["embedding"].unsqueeze(0)  # 단일 객체 임베딩으로 변환
+                        )
+                        
+                        real_obj["similar_candidates"].append({
+                        "scene_id": scene_id,
+                        "obj_id": j,
+                        "similarity": similarity,
+                        "box": scene_data["boxes"][j],
+                        "embedding": scene_embedding[j]
+                        })
+            
+            # 유사도 기준 정렬
+            real_obj["similar_candidates"].sort(key=lambda x: x["similarity"], reverse=True)
+        
+        # 3. 최적의 후보 선택하여 하이브리드 씬 구성
+        hybrid_scene = self.construct_hybrid_scene_from_candidates(real_objects)
+        
+        self.hybrid_scene = hybrid_scene
+        return hybrid_scene
+
+    def construct_hybrid_scene_from_candidates(self, real_objects):
+        """후보 객체들로부터 하이브리드 씬 구성"""
+        # 초기화
+        hybrid_objs = []
+        hybrid_boxes = []
+        hybrid_triples = []
+        
+        # 각 실제 객체마다 가장 유사한 가상 객체 선택
+        for real_obj in real_objects:
+            if real_obj["similar_candidates"]:
+                # 가장 유사한 후보 선택
+                best_candidate = real_obj["similar_candidates"][0]
+                
+                hybrid_objs.append(real_obj["class"])
+                
+                # 실제 객체 위치와 가상 객체 형태를 결합한 바운딩 박스
+                hybrid_box = best_candidate["box"].clone()
+                # 위치는 실제 객체의 위치 사용
+                hybrid_box[3:6] = real_obj["box"][3:6]
+                hybrid_boxes.append(hybrid_box)
+            else:
+                # 유사 후보가 없으면 실제 객체 그대로 사용
+                hybrid_objs.append(real_obj["class"])
+                hybrid_boxes.append(real_obj["box"])
+        
+        # 관계 구성 (단순 구현)
+        # 더 복잡한 관계 추론이 필요하면 추가 로직 개발 필요
+        
+        # 텐서 변환
+        hybrid_scene = {
+            "objs": torch.tensor(hybrid_objs),
+            "boxes": torch.stack(hybrid_boxes) if hybrid_boxes else torch.tensor([]),
+            "triples": torch.tensor(hybrid_triples) if hybrid_triples else torch.tensor([])
+        }
+        
+        return hybrid_scene
+
+    # Not in Use.
     def ensure_scene_consistency(self, hybrid_scene):
         """
         하이브리드 씬의 일관성 확보
@@ -723,7 +878,7 @@ class SpaceAdaptiveVAE:
                 hybrid_scene["triples"] = valid_triples
         
         return hybrid_scene
-    
+    # Not in Use.
     def check_box_collision(self, box1, box2): 
         """
         두 바운딩 박스 간의 충돌 확인
@@ -750,7 +905,7 @@ class SpaceAdaptiveVAE:
         collision = torch.all(distance < min_distance)
         
         return collision.item()
-    
+    # Not in Use.
     def resolve_collision(self, box1, box2):
         """
         두 바운딩 박스 간의 충돌 해결

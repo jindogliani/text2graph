@@ -3,7 +3,7 @@ import json
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
+import sys
 import pickle
 import os
 import glob
@@ -15,12 +15,19 @@ from model.VAEGAN_V1BOX import Sg2ScVAEModel as v1_box
 from model.VAEGAN_V1FULL import Sg2ScVAEModel as v1_full
 from model.VAEGAN_V2BOX import Sg2ScVAEModel as v2_box
 from model.VAEGAN_V2FULL import Sg2ScVAEModel as v2_full
+sys.path.append('../')
+try:
+    print("SpaceAdaptiveVAE 모듈을 불러옴")
+    from spaceadaptive.SpaceAdaptiveVAE import SpaceAdaptiveVAE
+except ImportError:
+    print("SpaceAdaptiveVAE 모듈을 불러올 수 없습니다!! 테스트 모드로 실행합니다.")
+    SpaceAdaptiveVAE = None
 
 class VAE(nn.Module):
     # diff_opt는 "diffusion options"의 약자
     def __init__(self, root="../GT",type='v1_box', diff_opt = '../config/v2_full.yaml', vocab=None, replace_latent=False, with_changes=True, distribution_before=True,
                  residual=False, gconv_pooling='avg', with_angles=False, num_box_params=6, lr_full=None, deepsdf=False, clip=True, with_E2=True,
-                 use_real_space=False, real_space_weight=0.3):
+                 use_real_space=False, real_space_weight=0.3, space_adaptive_vae=None):
         super().__init__()
         assert type in ['v1_box', 'v1_full', 'v2_box', 'v2_full'], '{} is not included'.format(type)
         # v1_box: Graph-to-Box, v1_full: Graph-to-3D (DeepSDF version)
@@ -38,6 +45,10 @@ class VAE(nn.Module):
         self.real_space_weight = real_space_weight
         self.real_space_embeddings = None
         self.space_data = None
+        if space_adaptive_vae is None:
+            print("SpaceAdaptiveVAE 모델 초기화")
+            space_adaptive_vae = SpaceAdaptiveVAE(self)
+        self.space_adaptive_vae = space_adaptive_vae
 
         if self.type_ == 'v1_box':
             assert replace_latent is not None
@@ -224,24 +235,8 @@ class VAE(nn.Module):
         else:
             return torch.tensor(0.0, device=z.device)
     
-# SpaceAdaptive: 현실 공간 손실 계산
-    def calculate_real_space_loss2(self, z, real_space_embedding):
-        """
-        현실 공간 임베딩과 생성된 잠재 벡터 간의 손실을 계산하는 메서드
-
-        """
-        # 모든 텐서의 복사본 생성 및 그래디언트 분리
-        z_detached = z.detach().clone() if isinstance(z, torch.Tensor) else z
-        real_space_emb_detached = real_space_embedding.detach().clone() if isinstance(real_space_embedding, torch.Tensor) else real_space_embedding
-        
-        # 중간 계산은 그래디언트 추적 없이 수행
-        with torch.no_grad():
-            
-            latent_loss = F.mse_loss(z_matched, real_space_embedding_matched, reduction='mean')
-            return latent_loss
-
     # SpaceAdaptive: 바운딩 박스 겹침 손실 계산
-    # 현재는 안 씀. Not in Use.
+    # Not in Use.
     def calculate_box_overlap_loss(self, boxes1, boxes2):
         """
         두 바운딩 박스 세트 간의 겹침을 계산하는 메서드
