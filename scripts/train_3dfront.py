@@ -90,7 +90,7 @@ print(args)
 # --batchSize 8 --workers 8 --loadmodel False --nepoch 10000 --large False
 
 # CLIP 없이도 가능한지 테스트용
-# python train_3dfront.py --room_type livingroom --residual True --network_type v2_box --with_SDF False --with_CLIP False --batchSize 8 --workers 8 --exp ../experiments/test
+# python train_3dfront.py --room_type all --residual True --network_type v2_box --with_SDF False --with_CLIP False --batchSize 8 --workers 8 --exp ../experiments/test
 
 def parse_data(data):
     enc_objs, enc_triples, enc_tight_boxes, enc_objs_to_scene, enc_triples_to_scene = data['encoder']['objs'], \
@@ -461,10 +461,14 @@ def train():
             else:
                 optimizer_bl.step()
 
+            iter_net_time = time.time()
+            eta = ((iter_net_time - iter_start_time) / (i + 1)) * len(dataloader) - (
+                    iter_net_time - iter_start_time)
+
             counter += 1
             if counter % 100 == 0:
-                message = "loss at {}: box {:.4f}\tshape {:.4f}\tdiscr RealFake {:.4f}\t discr Classifcation {:.4f}\t".format(
-                    counter, vae_loss_box, vae_loss_shape, loss_genShapeFake,
+                message = "loss at {}, (ETA: {:.2f}h): box {:.4f}\tshape {:.4f}\tdiscr RealFake {:.4f}\t discr Classifcation {:.4f}\t".format(
+                    counter, eta, vae_loss_box, vae_loss_shape, loss_genShapeFake,
                     loss_shape_fake_g)
                 if args.network_type == 'v2_full':
                     loss_diff = model.vae_v2.Diff.get_current_errors()

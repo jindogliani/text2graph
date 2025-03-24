@@ -326,46 +326,68 @@ class SpaceAdaptiveVAE:
         objs_tensor = objs_tensor.cuda()
         boxes_tensor = boxes_tensor.cuda()
         triples_tensor = triples_tensor.cuda()
+
+        boxes_coords = boxes_tensor[:, :6]  # 처음 6개 파라미터 (좌표/크기)
+        angles = None
+        if boxes_tensor.size(1) > 6:
+            angles = boxes_tensor[:, 6].long() - 1  # 7번째 파라미터 (각도)
+            # 각도 범위 보정 (0-23 사이로)
+            angles = torch.where(angles > 0, angles, torch.zeros_like(angles))
+            angles = torch.where(angles < 24, angles, torch.zeros_like(angles))
+        
+        # CLIP 특성이 필요한 경우 더미 데이터 생성
+        dummy_text_feats = torch.zeros((len(objs_tensor), 512)).cuda()
+        dummy_rel_feats = torch.zeros((len(triples_tensor), 512)).cuda()
         
         # 모델 타입에 따른 인코딩
-        if self.vae.type_ == 'v1_box' or self.vae.type_ == 'v2_box':
-            mu, _ = self.vae.vae_box.encoder(objs_tensor, triples_tensor, boxes_tensor, None)
-        elif self.vae.type_ == 'v1_full':
-            mu, _ = self.vae.vae.encoder(objs_tensor, triples_tensor, boxes_tensor, None)
+        if  self.vae.type_ == 'v2_box':
+            mu, _ = self.vae.vae_box.encoder(objs_tensor, triples_tensor, boxes_coords, None, dummy_text_feats, dummy_rel_feats, angles)
         elif self.vae.type_ == 'v2_full':
-            if self.vae.vae_v2.clip:
-                dummy_text_feats = torch.zeros((len(objs), 512)).cuda()
-                dummy_rel_feats = torch.zeros((len(triples), 512)).cuda()
-                mu, _ = self.vae.vae_v2.encoder(objs_tensor, triples_tensor, boxes_tensor, 
-                                              None, dummy_text_feats, dummy_rel_feats)
-            else:
-                mu, _ = self.vae.vae_v2.encoder(objs_tensor, triples_tensor, boxes_tensor, None)
+            mu, _ = self.vae.vae_v2.encoder(objs_tensor, triples_tensor, boxes_coords, None, dummy_text_feats, dummy_rel_feats, angles)
                 
         return mu
     
-    def calculate_embedding_similarity(self, embedding1, embedding2): # 검수완료
+    def calculate_embedding_similarity(self, virtual_embedding, real_embedding): # 검수완료
         """
         두 임베딩 벡터 간의 유사도 계산
         Args:
-            embedding1: 첫 번째 임베딩 벡터
-            embedding2: 두 번째 임베딩 벡터
+            vritual_embedding: 가상 씬 임베딩 벡터
+            real_embedding: 현실 공간 임베딩 벡터
         Returns:
             similarity: 두 임베딩 간의 유사도 (0~1 범위)
         """
+        virtual_emb = virtual_embedding.detach().clone()
+        real_emb = real_embedding.detach().clone()
+   
+        virtual_emb_mean = virtual_emb.mean(dim=0)  # [객체수, 64] -> [64]
+        virtual_emb_mean = virtual_emb_mean.cuda()
+        real_emb_mean = real_emb.mean(dim=0)  # [객체수, 64] -> [64]
+        real_emb_mean = real_emb_mean.cuda()
+        
+        # virtual_dim = virtual_emb_mean.shape[0]  # 64차원 또는 그 외
+        # real_dim = real_emb_mean.shape[0]        # 64차원 또는 그 외
+        # output_dim = 64
+        # self.virtual_adapter = nn.Linear(virtual_dim, output_dim).cuda()
+        # self.real_space_adapter = nn.Linear(real_dim, output_dim).cuda()
+        # virtual_embedding_adapted = self.virtual_adapter(virtual_emb_mean)
+        # real_embedding_adapted = self.real_space_adapter(real_emb_mean)
+
         # 코사인 유사도 계산
-        cos_sim = F.cosine_similarity(embedding1, embedding2, dim=0)
+        cos_sim = F.cosine_similarity(virtual_emb_mean, real_emb_mean, dim=0)
         
         # 유클리드 거리 계산 (정규화된 형태로)
-        euclidean_dist = torch.norm(embedding1 - embedding2, p=2)
-        max_dist = torch.sqrt(torch.tensor(embedding1.shape[0] * 2.0).float().cuda())  # 최대 가능한 거리
+        euclidean_dist = torch.norm(virtual_emb_mean - real_emb_mean, p=2)
+        max_dist = torch.sqrt(torch.tensor(real_emb_mean.shape[0] * 2.0).float().cuda())  # 최대 가능한 거리
         euclidean_sim = 1.0 - (euclidean_dist / max_dist)
         
         # 두 유사도의 가중 평균
-        similarity = 0.7 * cos_sim + 0.3 * euclidean_sim # TODO 가중치 값 정해지지 않음. 이렇게 임의로 설정 가능?
+        # 코사인 유사도: 벡터의 방향(의미)을 중요시하며, 객체 배치의 의미적 유사성을 잘 포착합니다
+        # 유클리드 유사도: 절대적 거리를 고려하여 객체 크기나 실제 공간 거리도 반영합니다
+        similarity = 0.7 * cos_sim + 0.3 * euclidean_sim # 가중치 값 그때그때 조절.
         
         return similarity.item()
     
-    def identify_similar_virtual_scenes(self, virtual_scenes_dataset, top_k=30): # 검수완료
+    def identify_similar_virtual_scenes(self, virtual_scenes_dataset, top_k=50): # 검수완료
         """
         현실 공간과 유사한 가상 씬들을 식별
         Args:
@@ -387,11 +409,11 @@ class SpaceAdaptiveVAE:
             if isinstance(self.real_space_embedding, dict):
                 max_similarity = 0
                 for space_id, space_emb in self.real_space_embedding.items():
-                    similarity = self.calculate_embedding_similarity(space_emb, scene_embedding)
+                    similarity = self.calculate_embedding_similarity(scene_embedding, space_emb)
                     max_similarity = max(max_similarity, similarity)
                 similarity = max_similarity
             else:
-                similarity = self.calculate_embedding_similarity(self.real_space_embedding[self.space_id], scene_embedding)
+                similarity = self.calculate_embedding_similarity(scene_embedding, self.real_space_embedding[self.space_id])
                 
             similar_scenes.append((scene_id, scene_data, similarity))
         
@@ -432,8 +454,8 @@ class SpaceAdaptiveVAE:
         
         # 2. 밀도 기반 클러스터링으로 영역 식별
         positions_array = np.array(obj_positions)
-        # TODO 클러스터링 알고리즘을 바꾸거나 파라미터 조정 필요. 현재는 DBSCAN 사용.
-        # TODO 클러스터링 할 때 scene이랑 floor 뺄 방법 고민 필요.
+        # TODO 클러스터링 알고리즘을 바꾸거나 파라미터 조정 필요. 현재는 DBSCAN 사용. 클러스터링 할 때 scene이랑 floor 뺄 방법 고민 필요.
+        # TODO 클러스터링 말고 그냥 객체 하나하나 별로 고민할 방법 필요.
         clustering = DBSCAN(eps=1.0, min_samples=2).fit(positions_array)
         labels = clustering.labels_
         # labels = array([0, 0, 1, 1, -1, 0, 2, 2, 1, -1])
@@ -610,7 +632,7 @@ class SpaceAdaptiveVAE:
         
         return hybrid_scene
         
-    def generate_hybrid_scene_from_similar(self, space_data=None): # TODO 구조 변경 필요...
+    def generate_hybrid_scene_from_similar(self, space_data=None, similar_scenes=None): 
         """
         식별된 유사 가상 씬들을 조합하여 하이브리드 씬 생성
         Args:
@@ -618,6 +640,8 @@ class SpaceAdaptiveVAE:
         Returns:
             hybrid_scene: 생성된 현실-가상 합성 씬
         """
+        if similar_scenes is None:
+            similar_scenes = self.similar_scenes
         if self.similar_scenes is None:
             raise ValueError("유사 가상 씬이 식별되지 않았습니다. identify_similar_virtual_scenes를 먼저 호출하세요.")
         if space_data is None:
@@ -626,6 +650,7 @@ class SpaceAdaptiveVAE:
             raise ValueError("현실 공간 데이터가 없습니다.")
         
         # 1. 공간을 영역으로 분할
+        # TODO 구조 변경 필요... 영역 분할 방법 변경 필요. 지금은 클러스터링으로 해버리는데 제대로 영역 분할이 안됨.
         real_space_regions = self.analyze_space_regions(self.space_id, space_data)
         
         # 2. 하이브리드 씬 초기화 (텐서 기반 구조로 초기화)
@@ -637,7 +662,7 @@ class SpaceAdaptiveVAE:
             if region_name == 'outliers':
                 continue
                 
-            best_fragment = self.find_best_matching_fragment(region_data, self.similar_scenes)
+            best_fragment = self.find_best_matching_fragment(region_data, similar_scenes)
             if best_fragment:
                 hybrid_scene = self.integrate_fragment(hybrid_scene, best_fragment, region_data)
         
@@ -647,7 +672,7 @@ class SpaceAdaptiveVAE:
         
         return hybrid_scene
     
-    def ensure_scene_consistency(self, hybrid_scene): # TODO 검수필요
+    def ensure_scene_consistency(self, hybrid_scene):
         """
         하이브리드 씬의 일관성 확보
         Args:
@@ -699,7 +724,7 @@ class SpaceAdaptiveVAE:
         
         return hybrid_scene
     
-    def check_box_collision(self, box1, box2): #TODO 검수필요
+    def check_box_collision(self, box1, box2): 
         """
         두 바운딩 박스 간의 충돌 확인
         Args:

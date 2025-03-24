@@ -83,7 +83,7 @@ class VAE(nn.Module):
         if hasattr(self, 'real_space_embeddings') and self.real_space_embeddings is not None:
             self.real_space_embeddings = {k: v.cuda() for k, v in self.real_space_embeddings.items()}
 
-    # SpaceAdaptive: 텐서 데이터 인코딩 (성공)
+    # SpaceAdaptive: 텐서 데이터 인코딩
     def encode_real_space_tensors(self, objs_tensor, boxes_tensor, triples_tensor):
         """
         이미 처리된 텐서 데이터를 인코딩하여 임베딩 벡터 생성
@@ -132,7 +132,8 @@ class VAE(nn.Module):
             embedding = mu
         return embedding
 
-    # SpaceAdaptive
+    # SpaceAdaptive # 추론 과정에서 작동. 랜덤한 잠재 벡터에 현실 공간 임베딩을 조건화하는 메서드. 돌아가게끔은 함.
+    # calculate_real_space_loss()처럼 in-place 연산 발생할 수 있어서 코드 수정 필요. => 일단은 해결
     def condition_with_real_space(self, real_space_embedding, z, alpha=None):
         """
         가상 공간 생성 시 현실 공간 임베딩으로 조건화하는 메서드
@@ -147,7 +148,10 @@ class VAE(nn.Module):
             alpha = self.real_space_weight
         
         # 현실 공간 임베딩과 가상 공간 잠재 벡터를 혼합
-        conditioned_z = alpha * real_space_embedding + (1 - alpha) * z
+        # in-place 연산 대신 새 텐서 생성 방식으로 변경
+        real_space_emb_clone = real_space_embedding.clone() if isinstance(real_space_embedding, torch.Tensor) else real_space_embedding
+        z_clone = z.clone() if isinstance(z, torch.Tensor) else z
+        conditioned_z = alpha * real_space_emb_clone + (1 - alpha) * z_clone
         
         return conditioned_z
     
@@ -163,28 +167,87 @@ class VAE(nn.Module):
         Returns:
             torch.Tensor: 계산된 손실값
         """
-        # 1. 잠재 공간에서의 손실 - 현실 공간 임베딩과 생성된 잠재 벡터 간의 MSE 손실
-        latent_loss = F.mse_loss(z, real_space_embedding, reduction='mean')
+        # 모든 텐서의 복사본 생성 및 그래디언트 분리
+        z_detached = z.detach().clone() if isinstance(z, torch.Tensor) else z
+        real_space_emb_detached = real_space_embedding.detach().clone() if isinstance(real_space_embedding, torch.Tensor) else real_space_embedding
         
-        # 2. 바운딩 박스 공간에서의 손실 - 현실 공간 바운딩 박스와 생성된 바운딩 박스 간의 손실
-        # 충돌 방지를 위한 손실 (겹치는 영역에 페널티)
-        box_loss = 0.0
-        if boxes_pred is not None and real_space_boxes_pred is not None:
-            # 바운딩 박스 간 겹침 계산
-            box_loss = self.calculate_box_overlap_loss(boxes_pred, real_space_boxes_pred)
+        # 중간 계산은 그래디언트 추적 없이 수행
+        with torch.no_grad():
+            # 코사인 유사도 기반 객체 매칭
+            matched_indices = []
+            used_indices = set()
+            
+            # 각 현실 공간 객체에 대해 가장 유사한 가상 객체 찾기
+            for ref_obj in real_space_emb_detached:
+                # 코사인 유사도 계산
+                similarities = F.cosine_similarity(ref_obj.unsqueeze(0), z_detached, dim=1)
+                
+                # 마스크 생성 (in-place 연산 없음)
+                mask = torch.ones_like(similarities, dtype=torch.bool)
+                for idx in used_indices:
+                    mask[idx] = False
+                
+                # 마스크 적용 (새 텐서 생성)
+                masked_similarities = torch.where(
+                    mask, 
+                    similarities, 
+                    torch.tensor(float('-inf')).to(similarities.device)
+                )
+                
+                # 가장 유사한 객체 인덱스
+                matched_idx = masked_similarities.argmax().item()
+                matched_indices.append(matched_idx)
+                used_indices.add(matched_idx)
+            
+            # 현실 객체 수가 가상 객체 수보다 많은 경우 처리
+            if len(matched_indices) > z_detached.size(0):
+                matched_indices = matched_indices[:z_detached.size(0)]
+            
+            # PyTorch 텐서로 변환 (인덱싱용)
+            if len(matched_indices) > 0:
+                matched_indices_tensor = torch.tensor(matched_indices, device=z.device)
+            else:
+                return torch.tensor(0.0, device=z.device)
         
-        # 가중치 적용 및 손실 결합
-        weighted_loss = (self.real_space_weight * latent_loss) + ((1 - self.real_space_weight) * box_loss)
-        
-        return weighted_loss
+        # 원본 텐서에서 인덱싱하여 실제 손실 계산
+        if len(matched_indices) > 0:
+            # 원본 텐서 사용하지만 새로운 텐서 생성
+            z_matched = z[matched_indices_tensor].clone()
+            
+            # 현실 공간 임베딩 준비
+            # 매칭된 인덱스 수만큼만 사용
+            real_space_embedding_matched = real_space_embedding[:len(matched_indices)].clone()
+            
+            # MSE 손실 계산
+            latent_loss = F.mse_loss(z_matched, real_space_embedding_matched, reduction='mean')
+            return latent_loss
+        else:
+            return torch.tensor(0.0, device=z.device)
     
+# SpaceAdaptive: 현실 공간 손실 계산
+    def calculate_real_space_loss2(self, z, real_space_embedding):
+        """
+        현실 공간 임베딩과 생성된 잠재 벡터 간의 손실을 계산하는 메서드
+
+        """
+        # 모든 텐서의 복사본 생성 및 그래디언트 분리
+        z_detached = z.detach().clone() if isinstance(z, torch.Tensor) else z
+        real_space_emb_detached = real_space_embedding.detach().clone() if isinstance(real_space_embedding, torch.Tensor) else real_space_embedding
+        
+        # 중간 계산은 그래디언트 추적 없이 수행
+        with torch.no_grad():
+            
+            latent_loss = F.mse_loss(z_matched, real_space_embedding_matched, reduction='mean')
+            return latent_loss
+
     # SpaceAdaptive: 바운딩 박스 겹침 손실 계산
+    # 현재는 안 씀. Not in Use.
     def calculate_box_overlap_loss(self, boxes1, boxes2):
         """
         두 바운딩 박스 세트 간의 겹침을 계산하는 메서드
         Args:
-            boxes1 (torch.Tensor): 첫 번째 바운딩 박스 세트 [N, 6] (x, y, z, dx, dy, dz)
-            boxes2 (torch.Tensor): 두 번째 바운딩 박스 세트 [M, 6] (x, y, z, dx, dy, dz)
+            boxes1 (torch.Tensor): 첫 번째 바운딩 박스 세트 [N, 6] [sx, sy, sz, cx, cy, cz]
+            boxes2 (torch.Tensor): 두 번째 바운딩 박스 세트 [M, 6] [sx, sy, sz, cx, cy, cz]
             
         Returns:
             torch.Tensor: 겹침에 대한 손실값
@@ -236,7 +299,7 @@ class VAE(nn.Module):
             
             # 현실 공간 임베딩 적용
             if use_real_space_embedding:
-                real_space_emb = self.real_space_embeddings[real_space_id]
+                real_space_emb = self.real_space_embeddings[real_space_id].clone() if isinstance(self.real_space_embeddings[real_space_id], torch.Tensor) else self.real_space_embeddings[real_space_id]
                 # 현실 공간 손실 계산 및 적용은 train() 함수에서 처리
 
             return mu, logvar, mu, logvar, orig_gt_boxes, orig_gt_angles, orig_gt_shapes, orig_boxes, orig_angles, orig_shapes, boxes, angles, obj_and_shape, keep
@@ -248,7 +311,7 @@ class VAE(nn.Module):
             
             # 현실 공간 임베딩 적용
             if use_real_space_embedding:
-                real_space_emb = self.real_space_embeddings[real_space_id]
+                real_space_emb = self.real_space_embeddings[real_space_id].clone() if isinstance(self.real_space_embeddings[real_space_id], torch.Tensor) else self.real_space_embeddings[real_space_id]
                 # 현실 공간 손실 계산 및 적용은 train() 함수에서 처리
 
             return mu_boxes, logvar_boxes, None, None, orig_gt_boxes, orig_gt_angles, None, orig_boxes, orig_angles, None, boxes, angles, None, keep
@@ -260,7 +323,7 @@ class VAE(nn.Module):
             
             # 현실 공간 임베딩 적용
             if use_real_space_embedding:
-                real_space_emb = self.real_space_embeddings[real_space_id]
+                real_space_emb = self.real_space_embeddings[real_space_id].clone() if isinstance(self.real_space_embeddings[real_space_id], torch.Tensor) else self.real_space_embeddings[real_space_id]
                 # 현실 공간 손실 계산 및 적용은 train() 함수에서 처리
 
             return mu_boxes, logvar_boxes, None, None, orig_gt_boxes, orig_gt_angles, None, orig_boxes, orig_angles, None, boxes, angles, None, keep
@@ -273,7 +336,7 @@ class VAE(nn.Module):
             
             # 현실 공간 임베딩 적용
             if use_real_space_embedding:
-                real_space_emb = self.real_space_embeddings[real_space_id]
+                real_space_emb = self.real_space_embeddings[real_space_id].clone() if isinstance(self.real_space_embeddings[real_space_id], torch.Tensor) else self.real_space_embeddings[real_space_id]
                 # 현실 공간 손실 계산 및 적용은 train() 함수에서 처리
             
             return mu, logvar, mu, logvar, orig_gt_boxes, orig_gt_angles, orig_gt_shapes, orig_boxes, orig_angles, orig_shapes, boxes, angles, obj_and_shape, keep
@@ -534,21 +597,21 @@ class VAE(nn.Module):
         elif self.type_ == 'v2_full':
             return self.vae_v2.decoder(z, dec_objs, dec_triplets, attributes, encoded_dec_text_feat, encoded_dec_rel_feat)[0]
     
-    # SpaceAdaptive
+    # SpaceAdaptive # 추론 과정에서 작동. 일단 검수는 함.
     def decoder_with_changes_boxes_and_shape_real(self, real_space_embedding, objs, triples, encoded_dec_text_feat, encoded_dec_rel_feat, dec_sdfs, attributes, missing_nodes, manipulated_nodes, gen_shape=False, real_space_weight=0.3):
         """
-        현실 공간 임베딩을 활용한 디코딩
-        
+        현실 공간 임베딩을 활용한 디코딩. 편집 모드에서 현실 공간 특성을 반영한 객체 배치.
         Args:
             real_space_embedding: 현실 공간 임베딩
             objs, triples, ...: 일반적인 디코딩 파라미터들
             real_space_weight: 현실 공간 임베딩 가중치
-            
         Returns:
             boxes, shapes: 생성된 바운딩 박스와 형상
         """
         # 현실 공간 임베딩과 랜덤 잠재 벡터 생성
-        batch_size = 1  # 기본값
+        # TODO 이렇게 랜덤한 잠재 벡터를 넣으면 아무런 특성이 없는 씬이 생성됨. 이 부분 수정 필요.
+        # 가상 공간 데이터셋(SG-FRONT)를 인코딩한 값을 넣어야 함. 
+        batch_size = real_space_embedding.shape[0]  # 기본값
         z_dim = real_space_embedding.shape[-1]
         z_random = torch.randn(batch_size, z_dim).cuda()
         
@@ -564,16 +627,14 @@ class VAE(nn.Module):
             boxes, shapes, _ = self.decoder_with_changes_boxes_and_shape(z_hybrid, None, objs, triples, encoded_dec_text_feat, encoded_dec_rel_feat, dec_sdfs, attributes, missing_nodes, manipulated_nodes, gen_shape=gen_shape)
             return boxes, shapes
 
-    # SpaceAdaptive Model
+    # SpaceAdaptive # 추론 과정에서 작동. 일단 검수는 함.
     def sample_box_and_shape_real(self, point_classes_idx, dec_objs, dec_triples, dec_sdfs, encoded_dec_text_feat, encoded_dec_rel_feat, dec_attributes, gen_shape=False, real_space_embedding=None, real_space_weight=0.3):
         """
-        현실 공간 임베딩을 활용한 샘플링
-        
+        현실 공간 임베딩을 활용한 샘플링. 처음부터 현실 공간 특성을 반영한 새로운 씬 생성.
         Args:
             point_classes_idx, dec_objs, ...: 일반적인 샘플링 파라미터들
             real_space_embedding: 현실 공간 임베딩
             real_space_weight: 현실 공간 임베딩 가중치
-            
         Returns:
             boxes, shapes: 생성된 바운딩 박스와 형상
         """
@@ -582,7 +643,9 @@ class VAE(nn.Module):
             return self.sample_box_and_shape(point_classes_idx, dec_objs, dec_triples, dec_sdfs, encoded_dec_text_feat, encoded_dec_rel_feat, dec_attributes, gen_shape)
         
         # 현실 공간 임베딩과 랜덤 잠재 벡터 결합
-        batch_size = 1  # 기본값
+        # TODO 이렇게 랜덤한 잠재 벡터를 넣으면 아무런 특성이 없는 씬이 생성됨. 이 부분 수정 필요.
+        # 가상 공간 데이터셋(SG-FRONT)를 인코딩한 값을 넣어야 함. 
+        batch_size = real_space_embedding.shape[0]
         z_dim = real_space_embedding.shape[-1]
         z_random = torch.randn(batch_size, z_dim).cuda()
         z_hybrid = self.condition_with_real_space(real_space_embedding, z_random, alpha=real_space_weight)
@@ -590,10 +653,8 @@ class VAE(nn.Module):
         # 결합된 잠재 벡터로 샘플링
         if self.type_ == 'v2_full':
             return self.vae_v2.sample_from_latent(point_classes_idx, z_hybrid, dec_objs, dec_triples, dec_sdfs, encoded_dec_text_feat, encoded_dec_rel_feat, dec_attributes, gen_shape=gen_shape)
-        elif self.type_ == 'v1_full':
-            return self.vae.sample_from_latent(point_classes_idx, z_hybrid, dec_objs, dec_triples, dec_attributes)
         else:
-            # v1_box, v2_box 처리
+            # v2_box 처리
             boxes = self.sample_box_from_latent(z_hybrid, dec_objs, dec_triples, encoded_dec_text_feat, encoded_dec_rel_feat, dec_attributes)
             shapes = None
             return boxes, shapes
