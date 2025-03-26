@@ -800,6 +800,72 @@ class SpaceAdaptiveVAE:
         
         return loss
 
+    def calculate_real_space_loss_v4(self, z, real_space_embedding=None):
+        if real_space_embedding is None:
+            real_space_embedding = self.real_space_embedding[self.space_id]
+
+        # 정규화 (cosine similarity를 위한)
+        z_norm = F.normalize(z, p=2, dim=1)  # [B, D]
+        real_norm = F.normalize(real_space_embedding, p=2, dim=1)  # [R, D]
+
+        # 전체 cosine similarity matrix: [R, B]
+        similarity_matrix = torch.matmul(real_norm, z_norm.T)
+
+        # 최적 매칭: greedy matching (non-differentiable이지만 soft 방식 아님)
+        matched_pairs = []
+        used_gen = set()
+
+        for i in range(similarity_matrix.size(0)):
+            # 이미 사용된 인덱스 제외
+            sims = similarity_matrix[i]
+            for j in sorted(used_gen):
+                sims[j] = -float('inf')
+
+            best_j = torch.argmax(sims).item()
+            matched_pairs.append((i, best_j))
+            used_gen.add(best_j)
+
+        if not matched_pairs:
+            return torch.tensor(0.0, device=z.device)
+
+        real_idx = torch.tensor([i for i, _ in matched_pairs], device=z.device)
+        gen_idx = torch.tensor([j for _, j in matched_pairs], device=z.device)
+
+        real_matched = real_space_embedding[real_idx]
+        gen_matched = z[gen_idx]
+
+        # 손실 계산
+        mse_loss = F.mse_loss(gen_matched, real_matched)
+        cos_loss = 1.0 - F.cosine_similarity(F.normalize(gen_matched, p=2, dim=1),
+                                            F.normalize(real_matched, p=2, dim=1), dim=1).mean()
+        loss = 0.7 * mse_loss + 0.3 * cos_loss
+
+        return loss
+
+    def calculate_real_space_loss_v5(self, z, real_space_embedding=None):
+        if real_space_embedding is None:
+            real_space_embedding = self.real_space_embedding[self.space_id]
+
+        # 정규화
+        z_norm = F.normalize(z, p=2, dim=1)  # [B, D]
+        real_norm = F.normalize(real_space_embedding, p=2, dim=1)  # [R, D]
+
+        # 전체 유사도 매트릭스 계산: [R, B]
+        sim_matrix = torch.matmul(real_norm, z_norm.T)  # cosine similarity
+
+        # **Softmax 기반 soft-matching**
+        sim_weights = F.softmax(sim_matrix, dim=1).detach()  # [R, B], 각 현실 obj → 가상 obj 분포
+
+        # 현실 → 가상 latent 가중합
+        gen_soft_matched = torch.matmul(sim_weights, z)  # [R, D]
+
+        # 손실 계산
+        mse_loss = F.mse_loss(gen_soft_matched, real_space_embedding)
+        cos_loss = 1.0 - F.cosine_similarity(F.normalize(gen_soft_matched, p=2, dim=1),
+                                            F.normalize(real_space_embedding, p=2, dim=1), dim=1).mean()
+        loss = 0.7 * mse_loss + 0.3 * cos_loss
+        return loss
+
     def generate_hybrid_scene_from_similar_v2(self, space_data=None, similar_scenes=None, space_id=None, real_space_embedding=None):
         """개선된 하이브리드 씬 생성 함수 - 객체 단위 접근"""
         if similar_scenes is None:

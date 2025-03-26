@@ -436,17 +436,11 @@ def train():
 
                 if use_real_space_this_batch and real_space_embedding is not None:
                     # clone() 사용하여 in-place 연산 방지
-                    real_space_emb_clone = real_space_embedding.detach().clone() if isinstance(real_space_embedding, torch.Tensor) else real_space_embedding
-                    mu_box_clone = mu_box.detach().clone() if isinstance(mu_box, torch.Tensor) else mu_box
+                    # real_space_emb_clone = real_space_embedding.detach().clone() if isinstance(real_space_embedding, torch.Tensor) else real_space_embedding
+                    # mu_box_clone = mu_box.detach().clone() if isinstance(mu_box, torch.Tensor) else mu_box
                     
-                    orig_box_clone = None
-                    boxes_clone = None
-                    if space_data[real_space_id]['boxes'] is not None:
-                        boxes_clone = space_data[real_space_id]['boxes'].clone() if isinstance(space_data[real_space_id]['boxes'], torch.Tensor) else space_data[real_space_id]['boxes']
-                    if orig_box is not None:
-                        orig_box_clone = orig_box.clone() if isinstance(orig_box, torch.Tensor) else orig_box
-                    vae_loss_realspace = space_adaptive_vae.calculate_real_space_loss_v3(mu_box_clone, real_space_emb_clone)
-                    # vae_loss_realspace = vae_loss_realspace.detach().clone()
+                    vae_loss_realspace = space_adaptive_vae.calculate_real_space_loss_v5(mu_box, real_space_embedding)
+
                 # 기본 손실 계산
                 loss = vae_loss_box + vae_loss_shape + 0.1 * loss_genShape + 100 * new_shape_loss
                 if args.with_changes:
