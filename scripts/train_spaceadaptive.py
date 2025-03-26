@@ -436,16 +436,17 @@ def train():
 
                 if use_real_space_this_batch and real_space_embedding is not None:
                     # clone() 사용하여 in-place 연산 방지
-                    real_space_emb_clone = real_space_embedding.clone() if isinstance(real_space_embedding, torch.Tensor) else real_space_embedding
+                    real_space_emb_clone = real_space_embedding.detach().clone() if isinstance(real_space_embedding, torch.Tensor) else real_space_embedding
+                    mu_box_clone = mu_box.detach().clone() if isinstance(mu_box, torch.Tensor) else mu_box
+                    
+                    orig_box_clone = None
                     boxes_clone = None
                     if space_data[real_space_id]['boxes'] is not None:
                         boxes_clone = space_data[real_space_id]['boxes'].clone() if isinstance(space_data[real_space_id]['boxes'], torch.Tensor) else space_data[real_space_id]['boxes']
-                    mu_box_clone = mu_box.clone() if isinstance(mu_box, torch.Tensor) else mu_box
-                    orig_box_clone = None
                     if orig_box is not None:
                         orig_box_clone = orig_box.clone() if isinstance(orig_box, torch.Tensor) else orig_box
-                    vae_loss_realspace = space_adaptive_vae.calculate_real_space_loss_v2(mu_box_clone, real_space_emb_clone)
-
+                    vae_loss_realspace = space_adaptive_vae.calculate_real_space_loss_v3(mu_box_clone, real_space_emb_clone)
+                    # vae_loss_realspace = vae_loss_realspace.detach().clone()
                 # 기본 손실 계산
                 loss = vae_loss_box + vae_loss_shape + 0.1 * loss_genShape + 100 * new_shape_loss
                 if args.with_changes:
@@ -455,17 +456,8 @@ def train():
                 if use_real_space_this_batch and vae_loss_realspace > 0:
                     # 손실이 0보다 큰 경우에만 가중치를 적용하여 추가
                     # vae_loss_realspace를 직접 더하는 대신 분리된 버전을 생성하여 사용
-                    real_space_loss_weighted = args.real_space_loss_weight * vae_loss_realspace.detach().clone()
+                    real_space_loss_weighted = args.real_space_loss_weight * vae_loss_realspace
                     loss = loss + real_space_loss_weighted
-
-                # # 디버깅 정보 출력
-                # if torch.is_tensor(mu_box):
-                #     print(f"[디버깅] mu_box 크기: {mu_box.shape}, requires_grad: {mu_box.requires_grad}")
-                # if use_real_space_this_batch and torch.is_tensor(real_space_emb_clone):
-                #     print(f"[디버깅] real_space_emb_clone 크기: {real_space_emb_clone.shape}")
-                # if use_real_space_this_batch and torch.is_tensor(mu_box_clone):
-                #     print(f"[디버깅] mu_box_clone 크기: {mu_box_clone.shape}, requires_grad: {mu_box_clone.requires_grad}")
-                # print(f"[디버깅] vae_loss_realspace: {vae_loss_realspace}")
 
                 # optimize
                 loss.backward(retain_graph=True)
@@ -504,7 +496,7 @@ def train():
                         iter_net_time - iter_start_time)
 
                 counter += 1
-                if counter % 100 == 0:
+                if counter % 50 == 0:
                     message = "loss at {}, (ETA: {:.2f}h): box {:.4f}\trealspace {:.4f}\tshape {:.4f}\t".format(
                         counter, eta, vae_loss_box, vae_loss_realspace, vae_loss_shape)
                     if args.network_type == 'v2_full':
@@ -512,10 +504,6 @@ def train():
                         for k, v in loss_diff.items():
                             message += '%s: %.6f ' % (k, v)
                     print(message)
-                    print(len(space_adaptive_vae.space_data[real_space_id]["candidates_during_training"]))
-                    for i in range(len(space_adaptive_vae.space_data[real_space_id]["candidates_during_training"])):
-                        print(len(space_adaptive_vae.space_data[real_space_id]["candidates_during_training"][i]), end=" ")
-                    print()
                     
                 writer.add_scalar('Train_Loss_BBox', vae_loss_box, counter)
                 writer.add_scalar('Train_Loss_RealSpace', vae_loss_realspace, counter)

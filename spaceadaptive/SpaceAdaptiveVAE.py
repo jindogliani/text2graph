@@ -678,6 +678,7 @@ class SpaceAdaptiveVAE:
         return hybrid_scene
     
     # SpaceAdaptive: 현실 공간 손실 계산
+    # Not in Use.
     def calculate_real_space_loss_v2(self, z, real_space_embedding=None):
         """
         현실 공간 임베딩과 생성된 잠재 벡터 간의 손실을 계산하는 메서드
@@ -733,6 +734,72 @@ class SpaceAdaptiveVAE:
             
             return latent_loss
     
+    # SpaceAdaptive: 현실 공간 손실 계산
+    def calculate_real_space_loss_v3(self, z, real_space_embedding=None):
+        """현실 공간 임베딩과 생성된 잠재 벡터 간의 손실 계산"""
+        if real_space_embedding is None:
+            real_space_embedding = self.real_space_embedding[self.space_id]
+        
+        # 배치 크기와 현실 객체 수
+        batch_size = z.size(0)
+        num_real_objects = real_space_embedding.size(0)
+        
+        # 중요: 그래디언트 차단 없이 손실 계산
+        # i*j 텐서를 만들어서 현실공간과 가상씬의 모든 조합에 대해서 전역적인 유사도 계산
+        similarity_matrix = torch.zeros(num_real_objects, batch_size, device=z.device)
+        
+        for i in range(num_real_objects):
+            for j in range(batch_size):
+                # 코사인 유사도 계산 
+                similarity_matrix[i, j] = F.cosine_similarity(
+                    real_space_embedding[i].unsqueeze(0),
+                    z[j].unsqueeze(0),
+                    dim=1
+                )
+        
+        # 최적 매칭 찾기
+        matched_pairs = []
+        used_gen_indices = set()
+        
+        for i in range(num_real_objects):
+            best_similarity = -float('inf')
+            best_gen_idx = -1
+            
+            for j in range(batch_size):
+                if j not in used_gen_indices and similarity_matrix[i, j] > best_similarity:
+                    best_similarity = similarity_matrix[i, j]
+                    best_gen_idx = j
+            
+            if best_gen_idx != -1:
+                matched_pairs.append((i, best_gen_idx))
+                used_gen_indices.add(best_gen_idx)
+        
+        if not matched_pairs:
+            return torch.tensor(0.0, device=z.device)
+        
+        # 매칭된 객체끼리 손실 계산
+        real_indices = [i for i, _ in matched_pairs]
+        gen_indices = [j for _, j in matched_pairs]
+        
+        real_matched = real_space_embedding[real_indices]
+        gen_matched = z[gen_indices]
+        
+        # 두 종류의 손실 조합
+        mse_loss = F.mse_loss(gen_matched, real_matched)
+        cos_loss = 1.0 - F.cosine_similarity(gen_matched, real_matched, dim=1).mean()
+        
+        # 조합된 손실
+        loss = 0.7 * mse_loss + 0.3 * cos_loss
+        
+        # 디버깅 출력 (선택사항)
+        # if hasattr(self, 'step_counter') and self.step_counter % 50 == 0:
+        #     print(f"Space Loss: {loss.item():.4f} (MSE: {mse_loss.item():.4f}, Cos: {cos_loss.item():.4f})")
+        
+        # 후보 저장은 별도 함수로 분리 (학습에 영향 없음)
+        # self._store_candidates(z.detach(), real_space_embedding, similarity_matrix)
+        
+        return loss
+
     def generate_hybrid_scene_from_similar_v2(self, space_data=None, similar_scenes=None, space_id=None, real_space_embedding=None):
         """개선된 하이브리드 씬 생성 함수 - 객체 단위 접근"""
         if similar_scenes is None:
