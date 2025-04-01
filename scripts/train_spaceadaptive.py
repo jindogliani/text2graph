@@ -438,8 +438,8 @@ def train():
                     # clone() 사용하여 in-place 연산 방지
                     # real_space_emb_clone = real_space_embedding.detach().clone() if isinstance(real_space_embedding, torch.Tensor) else real_space_embedding
                     # mu_box_clone = mu_box.detach().clone() if isinstance(mu_box, torch.Tensor) else mu_box
-                    
-                    vae_loss_realspace = space_adaptive_vae.calculate_real_space_loss_v5(mu_box, real_space_embedding)
+                    with torch.autograd.set_detect_anomaly(True):
+                        vae_loss_realspace = space_adaptive_vae.calculate_real_space_loss_v5_2(mu_box, real_space_embedding)
 
                 # 기본 손실 계산
                 loss = vae_loss_box + vae_loss_shape + 0.1 * loss_genShape + 100 * new_shape_loss
